@@ -500,7 +500,14 @@ app.get('/api/v1/drawing-sheets/:id', authenticateToken, async (req, res, next) 
        WHERE sh.id = $1`,
       [req.params.id]
     );
-
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Sheet not found' });
+    
+    const markupsResult = await pool.query(
+      `SELECT m.*, u.first_name || ' ' || u.last_name as created_by_name
+       FROM drawing_markups m LEFT JOIN users u ON m.created_by = u.id
+       WHERE m.drawing_sheet_id = $1 ORDER BY m.created_at DESC`,
+      [req.params.id]
+    );
     
     const sheet = result.rows[0];
     sheet.markups = markupsResult.rows;
@@ -509,7 +516,6 @@ app.get('/api/v1/drawing-sheets/:id', authenticateToken, async (req, res, next) 
     next(error);
   }
 });
-
 app.post('/api/v1/drawing-sheets/:sheetId/markups', authenticateToken, async (req, res, next) => {
   try {
     const { markup_data } = req.body;
