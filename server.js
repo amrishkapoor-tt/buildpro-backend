@@ -490,6 +490,15 @@ app.post('/api/v1/drawing-sets/:setId/sheets', authenticateToken, upload.single(
   }
 });
 
+app.delete('/api/v1/drawing-sheets/:id', authenticateToken, async (req, res, next) => {
+  try {
+    await pool.query('DELETE FROM drawing_sheets WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/v1/drawing-sheets/:id', authenticateToken, async (req, res, next) => {
   try {
     const result = await pool.query(
