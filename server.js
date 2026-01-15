@@ -490,6 +490,20 @@ app.post('/api/v1/drawing-sets/:setId/sheets', authenticateToken, upload.single(
   }
 });
 
+app.get('/api/v1/drawing-sheets/:sheetId/markups', authenticateToken, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT m.*, u.first_name || ' ' || u.last_name as created_by_name
+       FROM drawing_markups m LEFT JOIN users u ON m.created_by = u.id
+       WHERE m.drawing_sheet_id = $1 ORDER BY m.created_at DESC`,
+      [req.params.sheetId]
+    );
+    res.json({ markups: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.delete('/api/v1/drawing-sheets/:id', authenticateToken, async (req, res, next) => {
   try {
     await pool.query('DELETE FROM drawing_sheets WHERE id = $1', [req.params.id]);
