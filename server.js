@@ -628,6 +628,56 @@ app.get('/api/v1/projects/:projectId/photo-albums', authenticateToken, async (re
   }
 });
 
+app.delete('/api/v1/photo-albums/:id', authenticateToken, async (req, res, next) => {
+  try {
+    // Fetch album to verify it exists and get project_id
+    const albumQuery = await pool.query(
+      'SELECT project_id FROM photo_albums WHERE id = $1',
+      [req.params.id]
+    );
+
+    if (albumQuery.rows.length === 0) {
+      return res.status(404).json({ error: 'Album not found' });
+    }
+
+    const album = albumQuery.rows[0];
+
+    // Verify user is project member
+    const memberCheck = await pool.query(
+      'SELECT role FROM project_members WHERE project_id = $1 AND user_id = $2',
+      [album.project_id, req.user.userId]
+    );
+
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({
+        error: 'Access denied. You must be a project member to delete albums.'
+      });
+    }
+
+    // Delete album (photos will have album_id set to NULL due to ON DELETE SET NULL)
+    await pool.query('DELETE FROM photo_albums WHERE id = $1', [req.params.id]);
+
+    // Emit audit event
+    await emitEvent(
+      'album.deleted',
+      'photo_album',
+      req.params.id,
+      album.project_id,
+      req.user.userId,
+      { album_id: req.params.id }
+    );
+
+    res.json({
+      success: true,
+      deletedAlbumId: req.params.id
+    });
+
+  } catch (error) {
+    console.error('Delete album error:', error);
+    next(error);
+  }
+});
+
 app.post('/api/v1/photo-albums/:albumId/photos', authenticateToken, upload.single('photo'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No photo uploaded' });
