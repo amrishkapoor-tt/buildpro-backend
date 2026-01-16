@@ -325,6 +325,14 @@ app.post('/api/v1/projects/:projectId/documents', authenticateToken, upload.sing
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
       [req.params.projectId, name || req.file.originalname, req.file.path, req.file.size, req.file.mimetype, req.user.userId]
     );
+
+    // Create initial version entry (Version 1)
+    await pool.query(
+      `INSERT INTO document_versions (document_id, version_number, file_path, file_size, uploaded_by, version_name, is_current)
+       VALUES ($1, 1, $2, $3, $4, 'Original', true)`,
+      [result.rows[0].id, req.file.path, req.file.size, req.user.userId]
+    );
+
     await emitEvent('document.uploaded', 'document', result.rows[0].id, req.params.projectId, req.user.userId, result.rows[0]);
     res.status(201).json({ document: result.rows[0] });
   } catch (error) {
@@ -930,6 +938,14 @@ app.post('/api/v1/projects/:projectId/documents/bulk-upload', authenticateToken,
             meta.folder_id || null
           ]
         );
+
+        // Create initial version entry (Version 1)
+        await pool.query(
+          `INSERT INTO document_versions (document_id, version_number, file_path, file_size, uploaded_by, version_name, is_current)
+           VALUES ($1, 1, $2, $3, $4, 'Original', true)`,
+          [result.rows[0].id, file.path, file.size, req.user.userId]
+        );
+
         uploaded.push(result.rows[0]);
         await emitEvent('document.uploaded', 'document', result.rows[0].id, req.params.projectId, req.user.userId, result.rows[0]);
       } catch (error) {
