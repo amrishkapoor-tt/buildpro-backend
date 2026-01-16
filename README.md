@@ -148,17 +148,19 @@ S3 storage provides durable, scalable cloud storage for production use.
 3. **Create IAM user** with S3 permissions:
    - Create user: `buildpro-storage`
    - Attach policy with `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`, `s3:ListBucket`
-   - Save Access Key ID and Secret Access Key
+   - Save the Access Key ID and Secret Access Key (you'll need these in step 4)
 
-4. **Set environment variables**:
+4. **Set environment variables** (replace with your actual values):
    ```env
    STORAGE_TYPE=s3
    AWS_S3_BUCKET=buildpro-production-files
    AWS_REGION=us-east-1
-   AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
-   AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+   AWS_ACCESS_KEY_ID=your-access-key-from-step-3
+   AWS_SECRET_ACCESS_KEY=your-secret-key-from-step-3
    SIGNED_URL_EXPIRY=3600
    ```
+
+   **⚠️ Security Warning**: Never commit real AWS credentials to git. Always use environment variables or a secure secrets manager.
 
 **For detailed setup instructions**, see:
 - `.env.production.template` - Production configuration template
