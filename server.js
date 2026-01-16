@@ -254,6 +254,15 @@ app.post('/api/v1/projects', authenticateToken, async (req, res, next) => {
 });
 
 // DOCUMENTS
+app.delete('/api/v1/documents/:id', authenticateToken, async (req, res, next) => {
+  try {
+    await pool.query('DELETE FROM documents WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/v1/projects/:projectId/documents', authenticateToken, upload.single('file'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
