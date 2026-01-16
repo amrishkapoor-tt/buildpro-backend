@@ -106,6 +106,30 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// Middleware to check if user is a member of the project
+const requireProjectMember = async (req, res, next) => {
+  try {
+    const projectId = req.params.projectId || req.body.project_id;
+    if (!projectId) {
+      return res.status(400).json({ error: 'Project ID required' });
+    }
+
+    const result = await pool.query(
+      `SELECT role FROM project_members WHERE project_id = $1 AND user_id = $2`,
+      [projectId, req.user.userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(403).json({ error: 'Access denied. You must be a project member.' });
+    }
+
+    req.userRole = result.rows[0].role;
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
 const checkPermission = (requiredRole) => {
   return async (req, res, next) => {
     try {
