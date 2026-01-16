@@ -1,6 +1,6 @@
 // ============================================================================
 // BUILDPRO - COMPLETE PRODUCTION BACKEND
-// All 10 modules included - Ready for production deployment
+// All 11 modules included - Ready for production deployment
 // ============================================================================
 
 require('dotenv').config();
@@ -70,7 +70,7 @@ app.get('/', (req, res) => {
   res.json({
     message: 'BuildPro API - Complete',
     version: '1.0.0',
-    modules: ['auth', 'projects', 'documents', 'rfis', 'drawings', 'photos', 'submittals', 'dailylogs', 'punch', 'financials', 'team']
+    modules: ['auth', 'projects', 'scheduling', 'documents', 'rfis', 'drawings', 'photos', 'submittals', 'dailylogs', 'punch', 'financials', 'team']
   });
 });
 
@@ -2167,6 +2167,1185 @@ app.get('/api/v1/events', authenticateToken, async (req, res, next) => {
     next(error);
   }
 });
+// ============================================================================
+// PROJECT SCHEDULING & TIMELINE MANAGEMENT
+// Comprehensive scheduling system with tasks, dependencies, critical path
+// ============================================================================
+
+// ===========================================================================
+// SCHEDULE TASKS
+// ===========================================================================
+
+// Create a new task
+app.post('/api/v1/projects/:projectId/schedule/tasks', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
+  try {
+    const {
+      parent_task_id, task_code, name, description,
+      planned_start_date, planned_end_date, duration_days,
+      status, percent_complete, priority, task_type,
+      constraint_type, constraint_date,
+      budgeted_cost, assigned_to
+    } = req.body;
+
+    const result = await pool.query(
+      `INSERT INTO schedule_tasks (
+        project_id, parent_task_id, task_code, name, description,
+        planned_start_date, planned_end_date, duration_days,
+        status, percent_complete, priority, task_type,
+        constraint_type, constraint_date,
+        budgeted_cost, assigned_to, created_by
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+      RETURNING *`,
+      [
+        req.params.projectId, parent_task_id, task_code, name, description,
+        planned_start_date, planned_end_date, duration_days,
+        status || 'not_started', percent_complete || 0, priority || 'normal', task_type || 'task',
+        constraint_type, constraint_date,
+        budgeted_cost, assigned_to, req.user.userId
+      ]
+    );
+
+    await emitEvent('task.created', 'schedule_task', result.rows[0].id, req.params.projectId, req.user.userId, result.rows[0]);
+    res.status(201).json({ task: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get all tasks for a project (with hierarchy)
+app.get('/api/v1/projects/:projectId/schedule/tasks', authenticateToken, async (req, res, next) => {
+  try {
+    const { status, priority, assigned_to, parent_only } = req.query;
+
+    let query = `
+      SELECT t.*,
+             u.first_name || ' ' || u.last_name as assigned_to_name,
+             creator.first_name || ' ' || creator.last_name as created_by_name,
+             (SELECT COUNT(*) FROM schedule_tasks WHERE parent_task_id = t.id) as subtask_count
+      FROM schedule_tasks t
+      LEFT JOIN users u ON t.assigned_to = u.id
+      LEFT JOIN users creator ON t.created_by = creator.id
+      WHERE t.project_id = $1
+    `;
+    const params = [req.params.projectId];
+    let paramIndex = 2;
+
+    if (status) {
+      query += ` AND t.status = $${paramIndex}`;
+      params.push(status);
+      paramIndex++;
+    }
+
+    if (priority) {
+      query += ` AND t.priority = $${paramIndex}`;
+      params.push(priority);
+      paramIndex++;
+    }
+
+    if (assigned_to) {
+      query += ` AND t.assigned_to = $${paramIndex}`;
+      params.push(assigned_to);
+      paramIndex++;
+    }
+
+    if (parent_only === 'true') {
+      query += ` AND t.parent_task_id IS NULL`;
+    }
+
+    query += ` ORDER BY t.planned_start_date, t.task_code`;
+
+    const result = await pool.query(query, params);
+    res.json({ tasks: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get single task with details
+app.get('/api/v1/schedule/tasks/:id', authenticateToken, async (req, res, next) => {
+  try {
+    const taskResult = await pool.query(
+      `SELECT t.*,
+              u.first_name || ' ' || u.last_name as assigned_to_name,
+              creator.first_name || ' ' || creator.last_name as created_by_name,
+              parent.name as parent_task_name
+       FROM schedule_tasks t
+       LEFT JOIN users u ON t.assigned_to = u.id
+       LEFT JOIN users creator ON t.created_by = creator.id
+       LEFT JOIN schedule_tasks parent ON t.parent_task_id = parent.id
+       WHERE t.id = $1`,
+      [req.params.id]
+    );
+
+    if (taskResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    // Get subtasks
+    const subtasksResult = await pool.query(
+      `SELECT * FROM schedule_tasks WHERE parent_task_id = $1 ORDER BY planned_start_date`,
+      [req.params.id]
+    );
+
+    // Get dependencies
+    const predecessorsResult = await pool.query(
+      `SELECT td.*, t.name as predecessor_name
+       FROM task_dependencies td
+       JOIN schedule_tasks t ON td.predecessor_task_id = t.id
+       WHERE td.successor_task_id = $1`,
+      [req.params.id]
+    );
+
+    const successorsResult = await pool.query(
+      `SELECT td.*, t.name as successor_name
+       FROM task_dependencies td
+       JOIN schedule_tasks t ON td.successor_task_id = t.id
+       WHERE td.predecessor_task_id = $1`,
+      [req.params.id]
+    );
+
+    // Get assignments
+    const assignmentsResult = await pool.query(
+      `SELECT ta.*, u.first_name || ' ' || u.last_name as user_name
+       FROM task_assignments ta
+       JOIN users u ON ta.user_id = u.id
+       WHERE ta.task_id = $1`,
+      [req.params.id]
+    );
+
+    const task = {
+      ...taskResult.rows[0],
+      subtasks: subtasksResult.rows,
+      predecessors: predecessorsResult.rows,
+      successors: successorsResult.rows,
+      assignments: assignmentsResult.rows
+    };
+
+    res.json({ task });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Update task
+app.put('/api/v1/schedule/tasks/:id', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
+  try {
+    const {
+      name, description, planned_start_date, planned_end_date, duration_days,
+      actual_start_date, actual_end_date, status, percent_complete,
+      priority, constraint_type, constraint_date, budgeted_cost, actual_cost
+    } = req.body;
+
+    const result = await pool.query(
+      `UPDATE schedule_tasks SET
+        name = COALESCE($1, name),
+        description = COALESCE($2, description),
+        planned_start_date = COALESCE($3, planned_start_date),
+        planned_end_date = COALESCE($4, planned_end_date),
+        duration_days = COALESCE($5, duration_days),
+        actual_start_date = COALESCE($6, actual_start_date),
+        actual_end_date = COALESCE($7, actual_end_date),
+        status = COALESCE($8, status),
+        percent_complete = COALESCE($9, percent_complete),
+        priority = COALESCE($10, priority),
+        constraint_type = COALESCE($11, constraint_type),
+        constraint_date = COALESCE($12, constraint_date),
+        budgeted_cost = COALESCE($13, budgeted_cost),
+        actual_cost = COALESCE($14, actual_cost),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $15
+      RETURNING *`,
+      [
+        name, description, planned_start_date, planned_end_date, duration_days,
+        actual_start_date, actual_end_date, status, percent_complete,
+        priority, constraint_type, constraint_date, budgeted_cost, actual_cost,
+        req.params.id
+      ]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    await emitEvent('task.updated', 'schedule_task', req.params.id, result.rows[0].project_id, req.user.userId, result.rows[0]);
+    res.json({ task: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Delete task
+app.delete('/api/v1/schedule/tasks/:id', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
+  try {
+    const taskResult = await pool.query(
+      'SELECT project_id FROM schedule_tasks WHERE id = $1',
+      [req.params.id]
+    );
+
+    if (taskResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    // Cascade will handle dependencies and assignments
+    await pool.query('DELETE FROM schedule_tasks WHERE id = $1', [req.params.id]);
+
+    await emitEvent('task.deleted', 'schedule_task', req.params.id, taskResult.rows[0].project_id, req.user.userId, {});
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ===========================================================================
+// TASK DEPENDENCIES
+// ===========================================================================
+
+// Add task dependency
+app.post('/api/v1/schedule/tasks/:taskId/dependencies', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
+  try {
+    const { predecessor_task_id, dependency_type, lag_days } = req.body;
+
+    // Prevent circular dependencies (basic check)
+    if (predecessor_task_id === req.params.taskId) {
+      return res.status(400).json({ error: 'Cannot create self-dependency' });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO task_dependencies (
+        predecessor_task_id, successor_task_id, dependency_type, lag_days, created_by
+      ) VALUES ($1, $2, $3, $4, $5)
+      RETURNING *`,
+      [predecessor_task_id, req.params.taskId, dependency_type || 'FS', lag_days || 0, req.user.userId]
+    );
+
+    res.status(201).json({ dependency: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get task dependencies
+app.get('/api/v1/schedule/tasks/:taskId/dependencies', authenticateToken, async (req, res, next) => {
+  try {
+    const predecessorsResult = await pool.query(
+      `SELECT td.*,
+              pred.name as predecessor_name,
+              pred.planned_start_date as predecessor_start,
+              pred.planned_end_date as predecessor_end
+       FROM task_dependencies td
+       JOIN schedule_tasks pred ON td.predecessor_task_id = pred.id
+       WHERE td.successor_task_id = $1`,
+      [req.params.taskId]
+    );
+
+    const successorsResult = await pool.query(
+      `SELECT td.*,
+              succ.name as successor_name,
+              succ.planned_start_date as successor_start,
+              succ.planned_end_date as successor_end
+       FROM task_dependencies td
+       JOIN schedule_tasks succ ON td.successor_task_id = succ.id
+       WHERE td.predecessor_task_id = $1`,
+      [req.params.taskId]
+    );
+
+    res.json({
+      predecessors: predecessorsResult.rows,
+      successors: successorsResult.rows
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Delete dependency
+app.delete('/api/v1/schedule/dependencies/:id', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
+  try {
+    await pool.query('DELETE FROM task_dependencies WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ===========================================================================
+// MILESTONES
+// ===========================================================================
+
+// Create milestone
+app.post('/api/v1/projects/:projectId/schedule/milestones', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
+  try {
+    const {
+      name, description, milestone_type, target_date,
+      is_critical, related_task_id
+    } = req.body;
+
+    const result = await pool.query(
+      `INSERT INTO schedule_milestones (
+        project_id, name, description, milestone_type, target_date,
+        is_critical, related_task_id, created_by
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING *`,
+      [
+        req.params.projectId, name, description, milestone_type || 'project',
+        target_date, is_critical || false, related_task_id, req.user.userId
+      ]
+    );
+
+    res.status(201).json({ milestone: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get project milestones
+app.get('/api/v1/projects/:projectId/schedule/milestones', authenticateToken, async (req, res, next) => {
+  try {
+    const { status, milestone_type } = req.query;
+
+    let query = `
+      SELECT m.*,
+             t.name as related_task_name,
+             creator.first_name || ' ' || creator.last_name as created_by_name
+      FROM schedule_milestones m
+      LEFT JOIN schedule_tasks t ON m.related_task_id = t.id
+      LEFT JOIN users creator ON m.created_by = creator.id
+      WHERE m.project_id = $1
+    `;
+    const params = [req.params.projectId];
+    let paramIndex = 2;
+
+    if (status) {
+      query += ` AND m.status = $${paramIndex}`;
+      params.push(status);
+      paramIndex++;
+    }
+
+    if (milestone_type) {
+      query += ` AND m.milestone_type = $${paramIndex}`;
+      params.push(milestone_type);
+      paramIndex++;
+    }
+
+    query += ` ORDER BY m.target_date`;
+
+    const result = await pool.query(query, params);
+    res.json({ milestones: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Update milestone
+app.put('/api/v1/schedule/milestones/:id', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
+  try {
+    const {
+      name, description, target_date, forecast_date,
+      actual_date, status, is_critical
+    } = req.body;
+
+    const result = await pool.query(
+      `UPDATE schedule_milestones SET
+        name = COALESCE($1, name),
+        description = COALESCE($2, description),
+        target_date = COALESCE($3, target_date),
+        forecast_date = COALESCE($4, forecast_date),
+        actual_date = COALESCE($5, actual_date),
+        status = COALESCE($6, status),
+        is_critical = COALESCE($7, is_critical),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $8
+      RETURNING *`,
+      [name, description, target_date, forecast_date, actual_date, status, is_critical, req.params.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Milestone not found' });
+    }
+
+    res.json({ milestone: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Delete milestone
+app.delete('/api/v1/schedule/milestones/:id', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
+  try {
+    await pool.query('DELETE FROM schedule_milestones WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ===========================================================================
+// TASK ASSIGNMENTS
+// ===========================================================================
+
+// Assign user to task
+app.post('/api/v1/schedule/tasks/:taskId/assignments', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
+  try {
+    const { user_id, role, allocation_percent, assigned_from, assigned_to } = req.body;
+
+    const result = await pool.query(
+      `INSERT INTO task_assignments (
+        task_id, user_id, role, allocation_percent,
+        assigned_from, assigned_to, assigned_by
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT (task_id, user_id) DO UPDATE SET
+        role = EXCLUDED.role,
+        allocation_percent = EXCLUDED.allocation_percent,
+        assigned_from = EXCLUDED.assigned_from,
+        assigned_to = EXCLUDED.assigned_to
+      RETURNING *`,
+      [
+        req.params.taskId, user_id, role, allocation_percent || 100,
+        assigned_from, assigned_to, req.user.userId
+      ]
+    );
+
+    // Create notification for assigned user
+    const taskResult = await pool.query('SELECT name, project_id FROM schedule_tasks WHERE id = $1', [req.params.taskId]);
+    if (taskResult.rows.length > 0) {
+      await createNotification(
+        user_id,
+        'assignment',
+        'Task Assigned',
+        `You have been assigned to task: ${taskResult.rows[0].name}`,
+        'schedule_task',
+        req.params.taskId
+      );
+    }
+
+    res.status(201).json({ assignment: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get task assignments
+app.get('/api/v1/schedule/tasks/:taskId/assignments', authenticateToken, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT ta.*,
+              u.first_name || ' ' || u.last_name as user_name,
+              u.email as user_email
+       FROM task_assignments ta
+       JOIN users u ON ta.user_id = u.id
+       WHERE ta.task_id = $1`,
+      [req.params.taskId]
+    );
+
+    res.json({ assignments: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get user's assigned tasks
+app.get('/api/v1/users/:userId/assigned-tasks', authenticateToken, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT t.*, ta.role, ta.allocation_percent,
+              p.name as project_name
+       FROM schedule_tasks t
+       JOIN task_assignments ta ON t.id = ta.task_id
+       JOIN projects p ON t.project_id = p.id
+       WHERE ta.user_id = $1
+       ORDER BY t.planned_start_date`,
+      [req.params.userId]
+    );
+
+    res.json({ tasks: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Remove assignment
+app.delete('/api/v1/schedule/assignments/:id', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
+  try {
+    await pool.query('DELETE FROM task_assignments WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ===========================================================================
+// SCHEDULE BASELINES
+// ===========================================================================
+
+// Create baseline snapshot
+app.post('/api/v1/projects/:projectId/schedule/baselines', authenticateToken, checkPermission('project_manager'), async (req, res, next) => {
+  try {
+    const { name, description, baseline_type } = req.body;
+
+    // Get all tasks for snapshot
+    const tasksResult = await pool.query(
+      `SELECT * FROM schedule_tasks WHERE project_id = $1`,
+      [req.params.projectId]
+    );
+
+    // Get schedule date range
+    const rangeResult = await pool.query(
+      `SELECT MIN(planned_start_date) as start_date,
+              MAX(planned_end_date) as finish_date
+       FROM schedule_tasks
+       WHERE project_id = $1`,
+      [req.params.projectId]
+    );
+
+    // Deactivate other baselines if this is being set as active
+    if (baseline_type === 'original' || baseline_type === 'approved') {
+      await pool.query(
+        'UPDATE schedule_baselines SET is_active = false WHERE project_id = $1',
+        [req.params.projectId]
+      );
+    }
+
+    const result = await pool.query(
+      `INSERT INTO schedule_baselines (
+        project_id, name, description, baseline_type,
+        baseline_date, start_date, finish_date,
+        task_snapshot, is_active, created_by
+      ) VALUES ($1, $2, $3, $4, CURRENT_DATE, $5, $6, $7, $8, $9)
+      RETURNING *`,
+      [
+        req.params.projectId, name, description, baseline_type || 'approved',
+        rangeResult.rows[0].start_date, rangeResult.rows[0].finish_date,
+        JSON.stringify(tasksResult.rows),
+        baseline_type === 'original' || baseline_type === 'approved',
+        req.user.userId
+      ]
+    );
+
+    res.status(201).json({ baseline: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get project baselines
+app.get('/api/v1/projects/:projectId/schedule/baselines', authenticateToken, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, name, description, baseline_type, baseline_date,
+              start_date, finish_date, is_active, created_at
+       FROM schedule_baselines
+       WHERE project_id = $1
+       ORDER BY baseline_date DESC`,
+      [req.params.projectId]
+    );
+
+    res.json({ baselines: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get baseline details with task snapshot
+app.get('/api/v1/schedule/baselines/:id', authenticateToken, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM schedule_baselines WHERE id = $1`,
+      [req.params.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Baseline not found' });
+    }
+
+    res.json({ baseline: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Set active baseline
+app.put('/api/v1/schedule/baselines/:id/set-active', authenticateToken, checkPermission('project_manager'), async (req, res, next) => {
+  try {
+    const baselineResult = await pool.query(
+      'SELECT project_id FROM schedule_baselines WHERE id = $1',
+      [req.params.id]
+    );
+
+    if (baselineResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Baseline not found' });
+    }
+
+    // Deactivate all other baselines for this project
+    await pool.query(
+      'UPDATE schedule_baselines SET is_active = false WHERE project_id = $1',
+      [baselineResult.rows[0].project_id]
+    );
+
+    // Activate this baseline
+    await pool.query(
+      'UPDATE schedule_baselines SET is_active = true WHERE id = $1',
+      [req.params.id]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ===========================================================================
+// GANTT CHART DATA
+// ===========================================================================
+
+// Get Gantt chart data (tasks with dependencies for visualization)
+app.get('/api/v1/projects/:projectId/schedule/gantt', authenticateToken, async (req, res, next) => {
+  try {
+    // Get all tasks
+    const tasksResult = await pool.query(
+      `SELECT t.id, t.task_code, t.name, t.parent_task_id,
+              t.planned_start_date as start_date,
+              t.planned_end_date as end_date,
+              t.duration_days as duration,
+              t.status, t.percent_complete, t.is_critical,
+              t.priority, t.task_type,
+              u.first_name || ' ' || u.last_name as assigned_to_name
+       FROM schedule_tasks t
+       LEFT JOIN users u ON t.assigned_to = u.id
+       WHERE t.project_id = $1
+       ORDER BY t.planned_start_date, t.task_code`,
+      [req.params.projectId]
+    );
+
+    // Get all dependencies
+    const depsResult = await pool.query(
+      `SELECT td.id, td.predecessor_task_id as source,
+              td.successor_task_id as target,
+              td.dependency_type as type,
+              td.lag_days as lag
+       FROM task_dependencies td
+       JOIN schedule_tasks pred ON td.predecessor_task_id = pred.id
+       JOIN schedule_tasks succ ON td.successor_task_id = succ.id
+       WHERE pred.project_id = $1`,
+      [req.params.projectId]
+    );
+
+    // Get milestones
+    const milestonesResult = await pool.query(
+      `SELECT id, name, target_date as date, milestone_type, status, is_critical
+       FROM schedule_milestones
+       WHERE project_id = $1
+       ORDER BY target_date`,
+      [req.params.projectId]
+    );
+
+    res.json({
+      tasks: tasksResult.rows,
+      dependencies: depsResult.rows,
+      milestones: milestonesResult.rows
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ===========================================================================
+// CRITICAL PATH CALCULATION
+// ===========================================================================
+
+// Calculate and return critical path
+app.get('/api/v1/projects/:projectId/schedule/critical-path', authenticateToken, async (req, res, next) => {
+  try {
+    // Get all tasks and dependencies
+    const tasksResult = await pool.query(
+      `SELECT * FROM schedule_tasks WHERE project_id = $1`,
+      [req.params.projectId]
+    );
+
+    const depsResult = await pool.query(
+      `SELECT td.*
+       FROM task_dependencies td
+       JOIN schedule_tasks t ON td.successor_task_id = t.id
+       WHERE t.project_id = $1`,
+      [req.params.projectId]
+    );
+
+    const tasks = tasksResult.rows;
+    const dependencies = depsResult.rows;
+
+    if (tasks.length === 0) {
+      return res.json({ criticalPath: [], projectDuration: 0 });
+    }
+
+    // Build task map and dependency graph
+    const taskMap = new Map();
+    tasks.forEach(task => {
+      taskMap.set(task.id, {
+        ...task,
+        earlyStart: null,
+        earlyFinish: null,
+        lateStart: null,
+        lateFinish: null,
+        totalFloat: 0,
+        freeFloat: 0,
+        isCritical: false,
+        predecessors: [],
+        successors: []
+      });
+    });
+
+    // Build predecessor/successor relationships
+    dependencies.forEach(dep => {
+      const successor = taskMap.get(dep.successor_task_id);
+      const predecessor = taskMap.get(dep.predecessor_task_id);
+
+      if (successor && predecessor) {
+        successor.predecessors.push({
+          taskId: dep.predecessor_task_id,
+          type: dep.dependency_type,
+          lag: dep.lag_days || 0
+        });
+        predecessor.successors.push({
+          taskId: dep.successor_task_id,
+          type: dep.dependency_type,
+          lag: dep.lag_days || 0
+        });
+      }
+    });
+
+    // Forward pass (calculate Early Start and Early Finish)
+    const calculateForwardPass = (taskId, visited = new Set()) => {
+      if (visited.has(taskId)) return;
+      visited.add(taskId);
+
+      const task = taskMap.get(taskId);
+      if (!task) return;
+
+      if (task.predecessors.length === 0) {
+        // Start task - use planned start date
+        task.earlyStart = new Date(task.planned_start_date);
+        task.earlyFinish = new Date(task.earlyStart);
+        task.earlyFinish.setDate(task.earlyFinish.getDate() + task.duration_days);
+      } else {
+        // Calculate based on predecessors
+        let maxFinish = null;
+
+        task.predecessors.forEach(pred => {
+          calculateForwardPass(pred.taskId, visited);
+          const predTask = taskMap.get(pred.taskId);
+
+          if (predTask && predTask.earlyFinish) {
+            let finishDate = new Date(predTask.earlyFinish);
+            finishDate.setDate(finishDate.getDate() + pred.lag);
+
+            if (!maxFinish || finishDate > maxFinish) {
+              maxFinish = finishDate;
+            }
+          }
+        });
+
+        if (maxFinish) {
+          task.earlyStart = maxFinish;
+          task.earlyFinish = new Date(task.earlyStart);
+          task.earlyFinish.setDate(task.earlyFinish.getDate() + task.duration_days);
+        }
+      }
+    };
+
+    // Run forward pass for all tasks
+    tasks.forEach(task => calculateForwardPass(task.id));
+
+    // Find project end date (max early finish)
+    let projectEnd = null;
+    taskMap.forEach(task => {
+      if (task.earlyFinish && (!projectEnd || task.earlyFinish > projectEnd)) {
+        projectEnd = task.earlyFinish;
+      }
+    });
+
+    // Backward pass (calculate Late Start and Late Finish)
+    const calculateBackwardPass = (taskId, visited = new Set()) => {
+      if (visited.has(taskId)) return;
+      visited.add(taskId);
+
+      const task = taskMap.get(taskId);
+      if (!task) return;
+
+      if (task.successors.length === 0) {
+        // End task - late finish = project end
+        task.lateFinish = projectEnd;
+        task.lateStart = new Date(task.lateFinish);
+        task.lateStart.setDate(task.lateStart.getDate() - task.duration_days);
+      } else {
+        // Calculate based on successors
+        let minStart = null;
+
+        task.successors.forEach(succ => {
+          calculateBackwardPass(succ.taskId, visited);
+          const succTask = taskMap.get(succ.taskId);
+
+          if (succTask && succTask.lateStart) {
+            let startDate = new Date(succTask.lateStart);
+            startDate.setDate(startDate.getDate() - succ.lag);
+
+            if (!minStart || startDate < minStart) {
+              minStart = startDate;
+            }
+          }
+        });
+
+        if (minStart) {
+          task.lateFinish = minStart;
+          task.lateStart = new Date(task.lateFinish);
+          task.lateStart.setDate(task.lateStart.getDate() - task.duration_days);
+        }
+      }
+
+      // Calculate float
+      if (task.earlyStart && task.lateStart) {
+        task.totalFloat = Math.floor((task.lateStart - task.earlyStart) / (1000 * 60 * 60 * 24));
+        task.isCritical = task.totalFloat === 0;
+      }
+    };
+
+    // Run backward pass for all tasks
+    tasks.forEach(task => calculateBackwardPass(task.id));
+
+    // Extract critical path
+    const criticalPath = [];
+    taskMap.forEach(task => {
+      if (task.isCritical) {
+        criticalPath.push({
+          id: task.id,
+          name: task.name,
+          task_code: task.task_code,
+          duration_days: task.duration_days,
+          early_start: task.earlyStart,
+          early_finish: task.earlyFinish,
+          total_float: task.totalFloat
+        });
+      }
+    });
+
+    // Sort critical path by early start
+    criticalPath.sort((a, b) => a.early_start - b.early_start);
+
+    // Calculate project duration
+    const projectStart = tasks.reduce((min, task) => {
+      const taskDate = new Date(task.planned_start_date);
+      return !min || taskDate < min ? taskDate : min;
+    }, null);
+
+    const projectDuration = projectStart && projectEnd
+      ? Math.floor((projectEnd - projectStart) / (1000 * 60 * 60 * 24))
+      : 0;
+
+    // Update tasks in database with calculated values
+    const updatePromises = Array.from(taskMap.values()).map(task => {
+      return pool.query(
+        `UPDATE schedule_tasks SET
+          early_start_date = $1,
+          early_finish_date = $2,
+          late_start_date = $3,
+          late_finish_date = $4,
+          total_float_days = $5,
+          is_critical = $6
+        WHERE id = $7`,
+        [
+          task.earlyStart,
+          task.earlyFinish,
+          task.lateStart,
+          task.lateFinish,
+          task.totalFloat,
+          task.isCritical,
+          task.id
+        ]
+      );
+    });
+
+    await Promise.all(updatePromises);
+
+    res.json({
+      criticalPath,
+      projectDuration,
+      projectStart,
+      projectEnd,
+      criticalTaskCount: criticalPath.length,
+      totalTaskCount: tasks.length
+    });
+  } catch (error) {
+    console.error('Critical path calculation error:', error);
+    next(error);
+  }
+});
+
+// ===========================================================================
+// SCHEDULE ANALYTICS & REPORTING
+// ===========================================================================
+
+// Get project schedule summary
+app.get('/api/v1/projects/:projectId/schedule/summary', authenticateToken, async (req, res, next) => {
+  try {
+    // Task statistics
+    const statsResult = await pool.query(
+      `SELECT
+        COUNT(*) as total_tasks,
+        COUNT(*) FILTER (WHERE status = 'completed') as completed_tasks,
+        COUNT(*) FILTER (WHERE status = 'in_progress') as in_progress_tasks,
+        COUNT(*) FILTER (WHERE status = 'not_started') as not_started_tasks,
+        COUNT(*) FILTER (WHERE status = 'delayed') as delayed_tasks,
+        COUNT(*) FILTER (WHERE is_critical = true) as critical_tasks,
+        AVG(percent_complete) as avg_completion,
+        MIN(planned_start_date) as project_start,
+        MAX(planned_end_date) as project_end
+       FROM schedule_tasks
+       WHERE project_id = $1`,
+      [req.params.projectId]
+    );
+
+    // Milestone statistics
+    const milestoneStats = await pool.query(
+      `SELECT
+        COUNT(*) as total_milestones,
+        COUNT(*) FILTER (WHERE status = 'achieved') as achieved_milestones,
+        COUNT(*) FILTER (WHERE status = 'missed') as missed_milestones,
+        COUNT(*) FILTER (WHERE status = 'at_risk') as at_risk_milestones
+       FROM schedule_milestones
+       WHERE project_id = $1`,
+      [req.params.projectId]
+    );
+
+    // Budget statistics
+    const budgetStats = await pool.query(
+      `SELECT
+        COALESCE(SUM(budgeted_cost), 0) as total_budgeted,
+        COALESCE(SUM(actual_cost), 0) as total_actual,
+        COALESCE(SUM(actual_cost) - SUM(budgeted_cost), 0) as variance
+       FROM schedule_tasks
+       WHERE project_id = $1`,
+      [req.params.projectId]
+    );
+
+    // Upcoming tasks (next 7 days)
+    const upcomingResult = await pool.query(
+      `SELECT COUNT(*) as upcoming_tasks
+       FROM schedule_tasks
+       WHERE project_id = $1
+       AND planned_start_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days'
+       AND status = 'not_started'`,
+      [req.params.projectId]
+    );
+
+    // Overdue tasks
+    const overdueResult = await pool.query(
+      `SELECT COUNT(*) as overdue_tasks
+       FROM schedule_tasks
+       WHERE project_id = $1
+       AND planned_end_date < CURRENT_DATE
+       AND status != 'completed'`,
+      [req.params.projectId]
+    );
+
+    const summary = {
+      ...statsResult.rows[0],
+      ...milestoneStats.rows[0],
+      ...budgetStats.rows[0],
+      upcoming_tasks: upcomingResult.rows[0].upcoming_tasks,
+      overdue_tasks: overdueResult.rows[0].overdue_tasks
+    };
+
+    res.json({ summary });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get schedule variance report (baseline vs current)
+app.get('/api/v1/projects/:projectId/schedule/variance', authenticateToken, async (req, res, next) => {
+  try {
+    // Get active baseline
+    const baselineResult = await pool.query(
+      `SELECT * FROM schedule_baselines
+       WHERE project_id = $1 AND is_active = true
+       LIMIT 1`,
+      [req.params.projectId]
+    );
+
+    if (baselineResult.rows.length === 0) {
+      return res.status(404).json({ error: 'No active baseline found' });
+    }
+
+    const baseline = baselineResult.rows[0];
+    const baselineTasks = baseline.task_snapshot;
+
+    // Get current tasks
+    const currentResult = await pool.query(
+      `SELECT * FROM schedule_tasks WHERE project_id = $1`,
+      [req.params.projectId]
+    );
+
+    const currentTasks = currentResult.rows;
+
+    // Calculate variances
+    const variances = currentTasks.map(current => {
+      const baselineTask = baselineTasks.find(b => b.id === current.id);
+
+      if (!baselineTask) {
+        return {
+          task_id: current.id,
+          task_name: current.name,
+          status: 'new_task',
+          variance_days: null
+        };
+      }
+
+      const baselineEnd = new Date(baselineTask.planned_end_date);
+      const currentEnd = new Date(current.planned_end_date);
+      const varianceDays = Math.floor((currentEnd - baselineEnd) / (1000 * 60 * 60 * 24));
+
+      return {
+        task_id: current.id,
+        task_name: current.name,
+        task_code: current.task_code,
+        baseline_start: baselineTask.planned_start_date,
+        baseline_end: baselineTask.planned_end_date,
+        current_start: current.planned_start_date,
+        current_end: current.planned_end_date,
+        variance_days: varianceDays,
+        status: varianceDays > 0 ? 'delayed' : varianceDays < 0 ? 'ahead' : 'on_track',
+        is_critical: current.is_critical
+      };
+    });
+
+    // Summary statistics
+    const summary = {
+      total_tasks: variances.length,
+      tasks_delayed: variances.filter(v => v.status === 'delayed').length,
+      tasks_ahead: variances.filter(v => v.status === 'ahead').length,
+      tasks_on_track: variances.filter(v => v.status === 'on_track').length,
+      avg_variance_days: variances.reduce((sum, v) => sum + (v.variance_days || 0), 0) / variances.length,
+      critical_tasks_delayed: variances.filter(v => v.is_critical && v.status === 'delayed').length
+    };
+
+    res.json({
+      baseline: {
+        id: baseline.id,
+        name: baseline.name,
+        baseline_date: baseline.baseline_date
+      },
+      summary,
+      variances: variances.sort((a, b) => (b.variance_days || 0) - (a.variance_days || 0))
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get look-ahead schedule (next N weeks)
+app.get('/api/v1/projects/:projectId/schedule/look-ahead', authenticateToken, async (req, res, next) => {
+  try {
+    const { weeks = 3 } = req.query;
+    const endDate = new Date();
+    endDate.setDate(endDate.getDate() + (parseInt(weeks) * 7));
+
+    const result = await pool.query(
+      `SELECT t.*,
+              u.first_name || ' ' || u.last_name as assigned_to_name,
+              (SELECT COUNT(*) FROM task_dependencies WHERE successor_task_id = t.id) as predecessor_count
+       FROM schedule_tasks t
+       LEFT JOIN users u ON t.assigned_to = u.id
+       WHERE t.project_id = $1
+       AND t.planned_start_date BETWEEN CURRENT_DATE AND $2
+       AND t.status != 'completed'
+       ORDER BY t.planned_start_date, t.priority DESC`,
+      [req.params.projectId, endDate]
+    );
+
+    // Group by week
+    const tasksByWeek = {};
+    result.rows.forEach(task => {
+      const weekStart = new Date(task.planned_start_date);
+      weekStart.setDate(weekStart.getDate() - weekStart.getDay()); // Start of week
+      const weekKey = weekStart.toISOString().split('T')[0];
+
+      if (!tasksByWeek[weekKey]) {
+        tasksByWeek[weekKey] = [];
+      }
+      tasksByWeek[weekKey].push(task);
+    });
+
+    res.json({
+      weeks: parseInt(weeks),
+      end_date: endDate,
+      tasks_by_week: tasksByWeek,
+      total_tasks: result.rows.length
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ===========================================================================
+// SCHEDULE INTEGRATION
+// ===========================================================================
+
+// Link schedule task to other entities
+app.post('/api/v1/schedule/tasks/:taskId/links', authenticateToken, async (req, res, next) => {
+  try {
+    const { entity_type, entity_id, link_type, schedule_impact_days } = req.body;
+
+    const result = await pool.query(
+      `INSERT INTO schedule_links (
+        task_id, entity_type, entity_id, link_type,
+        schedule_impact_days, created_by
+      ) VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING *`,
+      [
+        req.params.taskId, entity_type, entity_id, link_type || 'related',
+        schedule_impact_days || 0, req.user.userId
+      ]
+    );
+
+    res.status(201).json({ link: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get task links
+app.get('/api/v1/schedule/tasks/:taskId/links', authenticateToken, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM schedule_links WHERE task_id = $1`,
+      [req.params.taskId]
+    );
+
+    res.json({ links: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get schedule impacts from RFIs, submittals, etc.
+app.get('/api/v1/projects/:projectId/schedule/impacts', authenticateToken, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT sl.*,
+              t.name as task_name,
+              t.planned_start_date,
+              t.planned_end_date
+       FROM schedule_links sl
+       JOIN schedule_tasks t ON sl.task_id = t.id
+       WHERE t.project_id = $1
+       AND sl.schedule_impact_days != 0
+       ORDER BY ABS(sl.schedule_impact_days) DESC`,
+      [req.params.projectId]
+    );
+
+    res.json({ impacts: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
 
 // ERROR HANDLER
 app.use((err, req, res, next) => {
@@ -2181,7 +3360,7 @@ app.use((err, req, res, next) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ BuildPro API (Complete) running on port ${PORT}`);
   console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🔧 All 10 modules loaded`);
+  console.log(`🔧 All 11 modules loaded: Auth, Projects, Scheduling, Documents, RFIs, Drawings, Photos, Submittals, Daily Logs, Punch, Financials, Team`);
 });
 
 process.on('SIGTERM', () => {

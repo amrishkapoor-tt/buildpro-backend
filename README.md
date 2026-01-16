@@ -8,7 +8,8 @@ BuildPro is a full-featured construction management system designed to help cons
 
 - **Authentication** - JWT-based user registration and login
 - **Projects** - Create and manage construction projects with team members
-- **Documents** - Upload and organize project documents
+- **Scheduling** ⭐ NEW - Full project scheduling with tasks, dependencies, critical path, and Gantt charts
+- **Documents** - Upload and organize project documents with cloud storage support
 - **RFIs** - Request for Information workflow with responses and status tracking
 - **Drawings** - Drawing sets, sheets, and PDF markup annotations
 - **Photos** - Photo albums with tagging and entity linking
