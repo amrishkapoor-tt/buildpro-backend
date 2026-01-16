@@ -187,11 +187,11 @@ async function seedDatabase() {
     console.log('📋 Creating RFIs with responses...');
 
     const rfiResult = await client.query(
-      `INSERT INTO rfis (project_id, rfi_number, subject, question, priority, status, created_by, assigned_to)
+      `INSERT INTO rfis (project_id, rfi_number, title, question, priority, status, created_by, assigned_to)
        VALUES
          ($1, 'RFI-001', 'Foundation Depth Clarification', 'Please confirm the foundation depth for grid lines A1-A5. Drawings show conflicting dimensions.', 'high', 'open', $2, $3),
-         ($1, 'RFI-002', 'Electrical Panel Location', 'Electrical panel location conflicts with mechanical equipment. Need coordination.', 'critical', 'open', $4, $2),
-         ($1, 'RFI-003', 'Window Schedule Revision', 'Window schedule shows discontinued models. Please provide approved alternatives.', 'medium', 'answered', $2, $3),
+         ($1, 'RFI-002', 'Electrical Panel Location', 'Electrical panel location conflicts with mechanical equipment. Need coordination.', 'urgent', 'open', $4, $2),
+         ($1, 'RFI-003', 'Window Schedule Revision', 'Window schedule shows discontinued models. Please provide approved alternatives.', 'normal', 'answered', $2, $3),
          ($1, 'RFI-004', 'Concrete Mix Design', 'Confirm concrete mix design for elevated slab - 3000 PSI or 4000 PSI?', 'high', 'answered', $4, $3),
          ($1, 'RFI-005', 'Stair Railing Detail', 'Detail 5/A3.1 is unclear for stair railing attachment. Need clarification.', 'low', 'closed', $2, $3)
        RETURNING id`,
@@ -461,16 +461,16 @@ async function seedDatabase() {
     console.log('📡 Creating activity feed events...');
 
     await client.query(
-      `INSERT INTO system_events (project_id, user_id, event_type, entity_type, entity_id, description)
+      `INSERT INTO system_events (project_id, user_id, event_type, entity_type, entity_id, event_data)
        VALUES
-         ($1, $2, 'document_upload', 'document', 1, 'uploaded Project Plans - Architectural.pdf'),
-         ($1, $3, 'rfi_created', 'rfi', 1, 'created RFI-001: Foundation Depth Clarification'),
-         ($1, $4, 'task_completed', 'task', 1, 'completed task: Foundation Pour'),
-         ($1, $2, 'milestone_achieved', 'milestone', 1, 'achieved milestone: Foundation Complete'),
-         ($1, $3, 'submittal_created', 'submittal', 1, 'created submittal: Steel beam specifications'),
-         ($1, $4, 'punch_item_created', 'punch_item', 3, 'created punch item #3: Fix leaking faucet'),
-         ($1, $2, 'document_upload', 'document', 2, 'uploaded Building Permit Application.pdf'),
-         ($1, $3, 'daily_log_created', 'daily_log', 1, 'created daily log for ' || TO_CHAR(CURRENT_DATE - INTERVAL '2 days', 'Mon DD, YYYY'))`,
+         ($1, $2, 'document_upload', 'document', 1, '{"message": "uploaded Project Plans - Architectural.pdf"}'::jsonb),
+         ($1, $3, 'rfi_created', 'rfi', 1, '{"message": "created RFI-001: Foundation Depth Clarification"}'::jsonb),
+         ($1, $4, 'task_completed', 'task', 1, '{"message": "completed task: Foundation Pour"}'::jsonb),
+         ($1, $2, 'milestone_achieved', 'milestone', 1, '{"message": "achieved milestone: Foundation Complete"}'::jsonb),
+         ($1, $3, 'submittal_created', 'submittal', 1, '{"message": "created submittal: Steel beam specifications"}'::jsonb),
+         ($1, $4, 'punch_item_created', 'punch_item', 3, '{"message": "created punch item #3: Fix leaking faucet"}'::jsonb),
+         ($1, $2, 'document_upload', 'document', 2, '{"message": "uploaded Building Permit Application.pdf"}'::jsonb),
+         ($1, $3, 'daily_log_created', 'daily_log', 1, jsonb_build_object('message', 'created daily log for ' || TO_CHAR(CURRENT_DATE - INTERVAL '2 days', 'Mon DD, YYYY')))`,
       [projectId, demoUser.id, sarah.id, mike.id]
     );
 

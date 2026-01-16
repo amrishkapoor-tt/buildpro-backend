@@ -3542,8 +3542,8 @@ app.get('/api/v1/projects/:projectId/activity', authenticateToken, requireProjec
 
     // Get recent system events
     const result = await pool.query(
-      `SELECT se.id, se.event_type, se.entity_type, se.entity_id, se.description,
-              se.created_at,
+      `SELECT se.id, se.event_type, se.entity_type, se.entity_id,
+              se.event_data, se.created_at,
               COALESCE(u.first_name || ' ' || u.last_name, u.email) as user_name,
               u.email as user_email
        FROM system_events se
@@ -3570,12 +3570,12 @@ app.get('/api/v1/projects/:projectId/recent-documents', authenticateToken, requi
     console.log(`[Recent Docs] Starting recent documents query for project: ${projectId}, limit: ${limit}`);
 
     const result = await pool.query(
-      `SELECT d.id, d.name, d.category, d.file_size, d.created_at,
+      `SELECT d.id, d.name, d.category, d.file_size, d.uploaded_at as created_at,
               COALESCE(u.first_name || ' ' || u.last_name, u.email) as uploaded_by_name
        FROM documents d
        LEFT JOIN users u ON d.uploaded_by = u.id
        WHERE d.project_id = $1
-       ORDER BY d.created_at DESC
+       ORDER BY d.uploaded_at DESC
        LIMIT $2`,
       [projectId, limit]
     );
@@ -3625,7 +3625,7 @@ app.get('/api/v1/projects/:projectId/open-rfis', authenticateToken, requireProje
     console.log(`[Open RFIs] Starting query for project: ${projectId}, limit: ${limit}`);
 
     const result = await pool.query(
-      `SELECT r.id, r.rfi_number, r.subject, r.priority, r.status, r.created_at,
+      `SELECT r.id, r.rfi_number, r.title as subject, r.priority, r.status, r.created_at,
               COALESCE(u.first_name || ' ' || u.last_name, u.email) as created_by_name,
               (SELECT COUNT(*) FROM rfi_responses WHERE rfi_id = r.id) as response_count
        FROM rfis r
@@ -3633,9 +3633,9 @@ app.get('/api/v1/projects/:projectId/open-rfis', authenticateToken, requireProje
        WHERE r.project_id = $1 AND r.status = 'open'
        ORDER BY
          CASE r.priority
-           WHEN 'critical' THEN 1
+           WHEN 'urgent' THEN 1
            WHEN 'high' THEN 2
-           WHEN 'medium' THEN 3
+           WHEN 'normal' THEN 3
            WHEN 'low' THEN 4
          END,
          r.created_at ASC

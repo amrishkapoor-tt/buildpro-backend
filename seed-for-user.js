@@ -183,11 +183,11 @@ async function seedForExistingUser() {
     // Create RFIs
     console.log('📋 Creating RFIs...');
     await client.query(
-      `INSERT INTO rfis (project_id, rfi_number, subject, question, priority, status, created_by, assigned_to)
+      `INSERT INTO rfis (project_id, rfi_number, title, question, priority, status, created_by, assigned_to)
        VALUES
          ($1, 'RFI-001', 'Foundation Depth Clarification', 'Please confirm the foundation depth for grid lines A1-A5. Drawings show conflicting dimensions.', 'high', 'open', $2, $2),
-         ($1, 'RFI-002', 'Electrical Panel Location', 'Electrical panel location conflicts with mechanical equipment. Need coordination.', 'critical', 'open', $2, $2),
-         ($1, 'RFI-003', 'Window Schedule Revision', 'Window schedule shows discontinued models. Please provide approved alternatives.', 'medium', 'answered', $2, $2)`,
+         ($1, 'RFI-002', 'Electrical Panel Location', 'Electrical panel location conflicts with mechanical equipment. Need coordination.', 'urgent', 'open', $2, $2),
+         ($1, 'RFI-003', 'Window Schedule Revision', 'Window schedule shows discontinued models. Please provide approved alternatives.', 'normal', 'answered', $2, $2)`,
       [projectId, user.id]
     );
     console.log(`   ✓ Created 3 RFIs\n`);
@@ -256,11 +256,11 @@ async function seedForExistingUser() {
 
     // Create Activity Events
     await client.query(
-      `INSERT INTO system_events (project_id, user_id, event_type, entity_type, entity_id, description)
+      `INSERT INTO system_events (project_id, user_id, event_type, entity_type, entity_id, event_data)
        VALUES
-         ($1, $2, 'document_upload', 'document', 1, 'uploaded Project Plans - Architectural.pdf'),
-         ($1, $2, 'rfi_created', 'rfi', 1, 'created RFI-001: Foundation Depth Clarification'),
-         ($1, $2, 'milestone_achieved', 'milestone', 1, 'achieved milestone: Foundation Complete')`,
+         ($1, $2, 'document_upload', 'document', 1, '{"message": "uploaded Project Plans - Architectural.pdf"}'::jsonb),
+         ($1, $2, 'rfi_created', 'rfi', 1, '{"message": "created RFI-001: Foundation Depth Clarification"}'::jsonb),
+         ($1, $2, 'milestone_achieved', 'milestone', 1, '{"message": "achieved milestone: Foundation Complete"}'::jsonb)`,
       [projectId, user.id]
     );
 
