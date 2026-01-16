@@ -742,6 +742,90 @@ app.post('/api/v1/photos/:photoId/link', authenticateToken, async (req, res, nex
   }
 });
 
+app.delete('/api/v1/photos/:id', authenticateToken, async (req, res, next) => {
+  const client = await pool.connect();
+
+  try {
+    // Fetch photo with document info
+    const photoQuery = await client.query(
+      `SELECT p.*, d.file_path, d.id as document_id
+       FROM photos p
+       JOIN documents d ON p.document_id = d.id
+       WHERE p.id = $1`,
+      [req.params.id]
+    );
+
+    if (photoQuery.rows.length === 0) {
+      client.release();
+      return res.status(404).json({ error: 'Photo not found' });
+    }
+
+    const photo = photoQuery.rows[0];
+    const filePath = photo.file_path;
+    const documentId = photo.document_id;
+
+    // Verify user is project member
+    const memberCheck = await client.query(
+      `SELECT role FROM project_members
+       WHERE project_id = $1 AND user_id = $2`,
+      [photo.project_id, req.user.userId]
+    );
+
+    if (memberCheck.rows.length === 0) {
+      client.release();
+      return res.status(403).json({
+        error: 'Access denied. You must be a project member to delete photos.'
+      });
+    }
+
+    // Database transaction
+    await client.query('BEGIN');
+
+    // Delete photo (CASCADE handles photo_tags and entity_links)
+    await client.query('DELETE FROM photos WHERE id = $1', [req.params.id]);
+
+    // Delete document
+    await client.query('DELETE FROM documents WHERE id = $1', [documentId]);
+
+    await client.query('COMMIT');
+
+    // File cleanup (non-blocking, after DB commit)
+    if (filePath) {
+      fs.unlink(filePath, (unlinkErr) => {
+        if (unlinkErr) {
+          console.error('File deletion error (non-critical):', unlinkErr);
+        }
+      });
+    }
+
+    // Emit audit event
+    await emitEvent(
+      'photo.deleted',
+      'photo',
+      req.params.id,
+      photo.project_id,
+      req.user.userId,
+      {
+        title: photo.title,
+        document_id: documentId
+      }
+    );
+
+    res.json({
+      success: true,
+      deletedPhotoId: req.params.id,
+      deletedDocumentId: documentId
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Delete photo error:', error);
+    next(error);
+  } finally {
+    client.release();
+  }
+});
+
 // SUBMITTALS
 app.post('/api/v1/projects/:projectId/submittal-packages', authenticateToken, async (req, res, next) => {
   try {
