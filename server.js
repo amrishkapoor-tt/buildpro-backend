@@ -256,30 +256,59 @@ app.post('/api/v1/projects', authenticateToken, async (req, res, next) => {
 // DOCUMENTS
 app.delete('/api/v1/documents/:id', authenticateToken, async (req, res, next) => {
   try {
-    // Get document version IDs for this document
+    // Get document and its file path
+    const docResult = await pool.query(
+      'SELECT file_path FROM documents WHERE id = $1',
+      [req.params.id]
+    );
+
+    if (docResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+
+    const mainFilePath = docResult.rows[0].file_path;
+
+    // Get document version IDs and file paths for this document
     const versions = await pool.query(
-      'SELECT id FROM document_versions WHERE document_id = $1', 
+      'SELECT id, file_path FROM document_versions WHERE document_id = $1',
       [req.params.id]
     );
     const versionIds = versions.rows.map(v => v.id);
-    
+    const versionFilePaths = versions.rows.map(v => v.file_path);
+
     if (versionIds.length > 0) {
       // Remove references from drawing_sheets
       await pool.query(
         'UPDATE drawing_sheets SET document_version_id = NULL WHERE document_version_id = ANY($1)',
         [versionIds]
       );
-      
+
       // Delete document versions
       await pool.query(
-        'DELETE FROM document_versions WHERE document_id = $1', 
+        'DELETE FROM document_versions WHERE document_id = $1',
         [req.params.id]
       );
     }
-    
+
     // Delete the document
     await pool.query('DELETE FROM documents WHERE id = $1', [req.params.id]);
-    
+
+    // File cleanup (non-blocking)
+    if (mainFilePath) {
+      fs.unlink(mainFilePath, (err) => {
+        if (err) console.error('File deletion error:', err);
+      });
+    }
+
+    // Delete version files
+    versionFilePaths.forEach(filePath => {
+      if (filePath) {
+        fs.unlink(filePath, (err) => {
+          if (err) console.error('Version file deletion error:', err);
+        });
+      }
+    });
+
     res.json({ success: true });
   } catch (error) {
     console.error('Delete document error:', error);
@@ -305,13 +334,700 @@ app.post('/api/v1/projects/:projectId/documents', authenticateToken, upload.sing
 
 app.get('/api/v1/projects/:projectId/documents', authenticateToken, async (req, res, next) => {
   try {
+    const { folder_id } = req.query;
+    let query, params;
+
+    if (folder_id) {
+      query = `SELECT d.*, u.first_name, u.last_name FROM documents d
+               LEFT JOIN users u ON d.uploaded_by = u.id
+               WHERE d.project_id = $1 AND d.folder_id = $2 ORDER BY d.uploaded_at DESC`;
+      params = [req.params.projectId, folder_id];
+    } else {
+      query = `SELECT d.*, u.first_name, u.last_name FROM documents d
+               LEFT JOIN users u ON d.uploaded_by = u.id
+               WHERE d.project_id = $1 ORDER BY d.uploaded_at DESC`;
+      params = [req.params.projectId];
+    }
+
+    const result = await pool.query(query, params);
+    res.json({ documents: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Update document metadata
+app.put('/api/v1/documents/:id', authenticateToken, async (req, res, next) => {
+  try {
+    const { name, description, tags, category } = req.body;
+    const result = await pool.query(
+      `UPDATE documents SET name = COALESCE($1, name), description = COALESCE($2, description),
+       tags = COALESCE($3, tags), category = COALESCE($4, category)
+       WHERE id = $5 RETURNING *`,
+      [name, description, tags, category, req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
+    res.json({ document: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Toggle document favorite
+app.post('/api/v1/documents/:id/favorite', authenticateToken, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `UPDATE documents SET is_favorite = NOT is_favorite WHERE id = $1 RETURNING *`,
+      [req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
+    res.json({ document: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get recent documents
+app.get('/api/v1/projects/:projectId/documents/recent', authenticateToken, async (req, res, next) => {
+  try {
     const result = await pool.query(
       `SELECT d.*, u.first_name, u.last_name FROM documents d
        LEFT JOIN users u ON d.uploaded_by = u.id
-       WHERE d.project_id = $1 ORDER BY d.uploaded_at DESC`,
+       WHERE d.project_id = $1 AND d.uploaded_at > NOW() - INTERVAL '7 days'
+       ORDER BY d.uploaded_at DESC LIMIT 20`,
       [req.params.projectId]
     );
     res.json({ documents: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get favorite documents
+app.get('/api/v1/projects/:projectId/documents/favorites', authenticateToken, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT d.*, u.first_name, u.last_name FROM documents d
+       LEFT JOIN users u ON d.uploaded_by = u.id
+       WHERE d.project_id = $1 AND d.is_favorite = true
+       ORDER BY d.uploaded_at DESC`,
+      [req.params.projectId]
+    );
+    res.json({ documents: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Advanced document search
+app.get('/api/v1/projects/:projectId/documents/search', authenticateToken, async (req, res, next) => {
+  try {
+    const { q, folder_id, category, tags, uploader_id, date_from, date_to, file_type, sort = 'date', order = 'desc' } = req.query;
+
+    let conditions = ['d.project_id = $1'];
+    let params = [req.params.projectId];
+    let paramIndex = 2;
+
+    if (q) {
+      conditions.push(`(d.name ILIKE $${paramIndex} OR d.description ILIKE $${paramIndex})`);
+      params.push(`%${q}%`);
+      paramIndex++;
+    }
+
+    if (folder_id) {
+      conditions.push(`d.folder_id = $${paramIndex}`);
+      params.push(folder_id);
+      paramIndex++;
+    }
+
+    if (category) {
+      conditions.push(`d.category = $${paramIndex}`);
+      params.push(category);
+      paramIndex++;
+    }
+
+    if (tags) {
+      const tagArray = tags.split(',');
+      conditions.push(`d.tags && $${paramIndex}`);
+      params.push(tagArray);
+      paramIndex++;
+    }
+
+    if (uploader_id) {
+      conditions.push(`d.uploaded_by = $${paramIndex}`);
+      params.push(uploader_id);
+      paramIndex++;
+    }
+
+    if (date_from) {
+      conditions.push(`d.uploaded_at >= $${paramIndex}`);
+      params.push(date_from);
+      paramIndex++;
+    }
+
+    if (date_to) {
+      conditions.push(`d.uploaded_at <= $${paramIndex}`);
+      params.push(date_to);
+      paramIndex++;
+    }
+
+    if (file_type) {
+      conditions.push(`d.mime_type LIKE $${paramIndex}`);
+      params.push(`%${file_type}%`);
+      paramIndex++;
+    }
+
+    const sortField = sort === 'name' ? 'd.name' : sort === 'size' ? 'd.file_size' : 'd.uploaded_at';
+    const sortOrder = order === 'asc' ? 'ASC' : 'DESC';
+
+    const query = `SELECT d.*, u.first_name, u.last_name FROM documents d
+                   LEFT JOIN users u ON d.uploaded_by = u.id
+                   WHERE ${conditions.join(' AND ')}
+                   ORDER BY ${sortField} ${sortOrder}`;
+
+    const result = await pool.query(query, params);
+    res.json({ documents: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Move document to folder
+app.post('/api/v1/documents/:id/move', authenticateToken, async (req, res, next) => {
+  try {
+    const { folder_id } = req.body;
+    const result = await pool.query(
+      `UPDATE documents SET folder_id = $1 WHERE id = $2 RETURNING *`,
+      [folder_id, req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
+    res.json({ document: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// FOLDER MANAGEMENT
+// Create folder
+app.post('/api/v1/projects/:projectId/folders', authenticateToken, async (req, res, next) => {
+  try {
+    const { name, parent_folder_id } = req.body;
+    if (!name) return res.status(400).json({ error: 'Folder name required' });
+
+    // Check for circular reference if parent exists
+    if (parent_folder_id) {
+      const parentCheck = await pool.query(
+        'SELECT project_id FROM document_folders WHERE id = $1',
+        [parent_folder_id]
+      );
+      if (parentCheck.rows.length === 0) {
+        return res.status(404).json({ error: 'Parent folder not found' });
+      }
+    }
+
+    const result = await pool.query(
+      `INSERT INTO document_folders (project_id, name, parent_folder_id, created_by)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [req.params.projectId, name, parent_folder_id || null, req.user.userId]
+    );
+    await emitEvent('folder.created', 'folder', result.rows[0].id, req.params.projectId, req.user.userId, result.rows[0]);
+    res.status(201).json({ folder: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get all folders (tree structure)
+app.get('/api/v1/projects/:projectId/folders', authenticateToken, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `WITH RECURSIVE folder_tree AS (
+        SELECT f.*, u.first_name, u.last_name,
+               (SELECT COUNT(*) FROM documents d WHERE d.folder_id = f.id) as document_count,
+               ARRAY[f.id] as path
+        FROM document_folders f
+        LEFT JOIN users u ON f.created_by = u.id
+        WHERE f.project_id = $1 AND f.parent_folder_id IS NULL
+
+        UNION ALL
+
+        SELECT f.*, u.first_name, u.last_name,
+               (SELECT COUNT(*) FROM documents d WHERE d.folder_id = f.id) as document_count,
+               ft.path || f.id
+        FROM document_folders f
+        LEFT JOIN users u ON f.created_by = u.id
+        INNER JOIN folder_tree ft ON f.parent_folder_id = ft.id
+        WHERE f.project_id = $1
+      )
+      SELECT * FROM folder_tree ORDER BY path`,
+      [req.params.projectId]
+    );
+    res.json({ folders: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Rename folder
+app.put('/api/v1/folders/:id', authenticateToken, async (req, res, next) => {
+  try {
+    const { name } = req.body;
+    if (!name) return res.status(400).json({ error: 'Folder name required' });
+
+    const result = await pool.query(
+      `UPDATE document_folders SET name = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *`,
+      [name, req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Folder not found' });
+    res.json({ folder: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Delete folder (move contents to parent)
+app.delete('/api/v1/folders/:id', authenticateToken, async (req, res, next) => {
+  try {
+    const folderResult = await pool.query(
+      'SELECT parent_folder_id FROM document_folders WHERE id = $1',
+      [req.params.id]
+    );
+    if (folderResult.rows.length === 0) return res.status(404).json({ error: 'Folder not found' });
+
+    const parentFolderId = folderResult.rows[0].parent_folder_id;
+
+    // Move documents to parent (or null if no parent)
+    await pool.query(
+      'UPDATE documents SET folder_id = $1 WHERE folder_id = $2',
+      [parentFolderId, req.params.id]
+    );
+
+    // Move child folders to parent
+    await pool.query(
+      'UPDATE document_folders SET parent_folder_id = $1 WHERE parent_folder_id = $2',
+      [parentFolderId, req.params.id]
+    );
+
+    // Delete the folder
+    await pool.query('DELETE FROM document_folders WHERE id = $1', [req.params.id]);
+
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// DOCUMENT VERSIONING
+// Upload new version
+app.post('/api/v1/documents/:id/versions', authenticateToken, upload.single('file'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    const { version_name, change_description } = req.body;
+
+    // Get current max version number
+    const versionResult = await pool.query(
+      'SELECT COALESCE(MAX(version_number), 0) as max_version FROM document_versions WHERE document_id = $1',
+      [req.params.id]
+    );
+    const newVersionNumber = versionResult.rows[0].max_version + 1;
+
+    // Mark all existing versions as not current
+    await pool.query(
+      'UPDATE document_versions SET is_current = false WHERE document_id = $1',
+      [req.params.id]
+    );
+
+    // Insert new version
+    const result = await pool.query(
+      `INSERT INTO document_versions (document_id, version_number, file_path, file_size, uploaded_by, version_name, change_description, is_current)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, true) RETURNING *`,
+      [req.params.id, newVersionNumber, req.file.path, req.file.size, req.user.userId, version_name, change_description]
+    );
+
+    // Update main document file_path to new version
+    await pool.query(
+      'UPDATE documents SET file_path = $1, file_size = $2 WHERE id = $3',
+      [req.file.path, req.file.size, req.params.id]
+    );
+
+    res.status(201).json({ version: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get version history
+app.get('/api/v1/documents/:id/versions', authenticateToken, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT v.*, u.first_name, u.last_name FROM document_versions v
+       LEFT JOIN users u ON v.uploaded_by = u.id
+       WHERE v.document_id = $1 ORDER BY v.version_number DESC`,
+      [req.params.id]
+    );
+    res.json({ versions: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Download specific version
+app.get('/api/v1/document-versions/:versionId', authenticateToken, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      'SELECT file_path FROM document_versions WHERE id = $1',
+      [req.params.versionId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Version not found' });
+
+    const filePath = result.rows[0].file_path;
+    res.download(filePath);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Revert to specific version
+app.put('/api/v1/documents/:id/versions/:versionId/set-current', authenticateToken, async (req, res, next) => {
+  try {
+    // Mark all versions as not current
+    await pool.query(
+      'UPDATE document_versions SET is_current = false WHERE document_id = $1',
+      [req.params.id]
+    );
+
+    // Mark specified version as current
+    const result = await pool.query(
+      'UPDATE document_versions SET is_current = true WHERE id = $1 AND document_id = $2 RETURNING *',
+      [req.params.versionId, req.params.id]
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Version not found' });
+
+    // Update main document file_path
+    await pool.query(
+      'UPDATE documents SET file_path = $1, file_size = $2 WHERE id = $3',
+      [result.rows[0].file_path, result.rows[0].file_size, req.params.id]
+    );
+
+    res.json({ version: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Delete version (only if not current)
+app.delete('/api/v1/document-versions/:versionId', authenticateToken, async (req, res, next) => {
+  try {
+    const versionResult = await pool.query(
+      'SELECT is_current FROM document_versions WHERE id = $1',
+      [req.params.versionId]
+    );
+
+    if (versionResult.rows.length === 0) return res.status(404).json({ error: 'Version not found' });
+    if (versionResult.rows[0].is_current) {
+      return res.status(400).json({ error: 'Cannot delete current version' });
+    }
+
+    await pool.query('DELETE FROM document_versions WHERE id = $1', [req.params.versionId]);
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// TAG MANAGEMENT
+// Add tags to document
+app.post('/api/v1/documents/:id/tags', authenticateToken, async (req, res, next) => {
+  try {
+    const { tags } = req.body;
+    if (!Array.isArray(tags)) return res.status(400).json({ error: 'Tags must be an array' });
+
+    const result = await pool.query(
+      `UPDATE documents SET tags = array_cat(COALESCE(tags, ARRAY[]::TEXT[]), $1) WHERE id = $2 RETURNING *`,
+      [tags, req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
+    res.json({ document: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Remove tag from document
+app.delete('/api/v1/documents/:id/tags', authenticateToken, async (req, res, next) => {
+  try {
+    const { tag } = req.body;
+    if (!tag) return res.status(400).json({ error: 'Tag required' });
+
+    const result = await pool.query(
+      `UPDATE documents SET tags = array_remove(tags, $1) WHERE id = $2 RETURNING *`,
+      [tag, req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
+    res.json({ document: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get all tags with usage count
+app.get('/api/v1/projects/:projectId/tags', authenticateToken, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT unnest(tags) as tag, COUNT(*) as count
+       FROM documents WHERE project_id = $1 AND tags IS NOT NULL
+       GROUP BY tag ORDER BY count DESC`,
+      [req.params.projectId]
+    );
+    res.json({ tags: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Update document category
+app.put('/api/v1/documents/:id/category', authenticateToken, async (req, res, next) => {
+  try {
+    const { category } = req.body;
+    const result = await pool.query(
+      `UPDATE documents SET category = $1 WHERE id = $2 RETURNING *`,
+      [category, req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
+    res.json({ document: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// DOCUMENT LINKING
+// Link document to entity
+app.post('/api/v1/documents/:id/link', authenticateToken, async (req, res, next) => {
+  try {
+    const { target_type, target_id, relationship } = req.body;
+    if (!target_type || !target_id) {
+      return res.status(400).json({ error: 'target_type and target_id required' });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO entity_links (source_type, source_id, target_type, target_id, relationship)
+       VALUES ('document', $1, $2, $3, $4) RETURNING *`,
+      [req.params.id, target_type, target_id, relationship || 'attachment']
+    );
+    res.status(201).json({ link: result.rows[0] });
+  } catch (error) {
+    if (error.code === '23505') { // Unique violation
+      return res.status(400).json({ error: 'Link already exists' });
+    }
+    next(error);
+  }
+});
+
+// Unlink document
+app.delete('/api/v1/document-links/:linkId', authenticateToken, async (req, res, next) => {
+  try {
+    await pool.query('DELETE FROM entity_links WHERE id = $1', [req.params.linkId]);
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get all links for document
+app.get('/api/v1/documents/:id/links', authenticateToken, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM entity_links WHERE source_type = 'document' AND source_id = $1`,
+      [req.params.id]
+    );
+    res.json({ links: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get documents linked to RFI
+app.get('/api/v1/rfis/:id/documents', authenticateToken, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT d.*, u.first_name, u.last_name, el.id as link_id FROM entity_links el
+       INNER JOIN documents d ON d.id = el.source_id::UUID
+       LEFT JOIN users u ON d.uploaded_by = u.id
+       WHERE el.source_type = 'document' AND el.target_type = 'rfi' AND el.target_id = $1`,
+      [req.params.id]
+    );
+    res.json({ documents: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get documents linked to submittal
+app.get('/api/v1/submittals/:id/documents', authenticateToken, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT d.*, u.first_name, u.last_name, el.id as link_id FROM entity_links el
+       INNER JOIN documents d ON d.id = el.source_id::UUID
+       LEFT JOIN users u ON d.uploaded_by = u.id
+       WHERE el.source_type = 'document' AND el.target_type = 'submittal' AND el.target_id = $1`,
+      [req.params.id]
+    );
+    res.json({ documents: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// BULK OPERATIONS
+// Bulk upload
+app.post('/api/v1/projects/:projectId/documents/bulk-upload', authenticateToken, upload.array('files', 10), async (req, res, next) => {
+  try {
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: 'No files uploaded' });
+    }
+
+    const metadata = req.body.metadata ? JSON.parse(req.body.metadata) : [];
+    const uploaded = [];
+    const failed = [];
+
+    for (let i = 0; i < req.files.length; i++) {
+      const file = req.files[i];
+      const meta = metadata[i] || {};
+
+      try {
+        const result = await pool.query(
+          `INSERT INTO documents (project_id, name, file_path, file_size, mime_type, uploaded_by, description, tags, category, folder_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+          [
+            req.params.projectId,
+            meta.name || file.originalname,
+            file.path,
+            file.size,
+            file.mimetype,
+            req.user.userId,
+            meta.description || null,
+            meta.tags || null,
+            meta.category || null,
+            meta.folder_id || null
+          ]
+        );
+        uploaded.push(result.rows[0]);
+        await emitEvent('document.uploaded', 'document', result.rows[0].id, req.params.projectId, req.user.userId, result.rows[0]);
+      } catch (error) {
+        failed.push({ file: file.originalname, error: error.message });
+      }
+    }
+
+    res.status(201).json({ uploaded, failed });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Bulk move
+app.post('/api/v1/documents/bulk-move', authenticateToken, async (req, res, next) => {
+  try {
+    const { document_ids, folder_id } = req.body;
+    if (!Array.isArray(document_ids)) {
+      return res.status(400).json({ error: 'document_ids must be an array' });
+    }
+
+    await pool.query(
+      'UPDATE documents SET folder_id = $1 WHERE id = ANY($2)',
+      [folder_id, document_ids]
+    );
+
+    res.json({ success: true, count: document_ids.length });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Bulk delete
+app.post('/api/v1/documents/bulk-delete', authenticateToken, async (req, res, next) => {
+  try {
+    const { document_ids } = req.body;
+    if (!Array.isArray(document_ids)) {
+      return res.status(400).json({ error: 'document_ids must be an array' });
+    }
+
+    // Get file paths for cleanup
+    const filesResult = await pool.query(
+      'SELECT file_path FROM documents WHERE id = ANY($1)',
+      [document_ids]
+    );
+
+    // Delete documents (CASCADE handles versions)
+    await pool.query('DELETE FROM documents WHERE id = ANY($1)', [document_ids]);
+
+    // Cleanup files (non-blocking)
+    filesResult.rows.forEach(row => {
+      if (row.file_path) {
+        fs.unlink(row.file_path, err => {
+          if (err) console.error('File deletion error:', err);
+        });
+      }
+    });
+
+    res.json({ success: true, count: document_ids.length });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Bulk tag
+app.post('/api/v1/documents/bulk-tag', authenticateToken, async (req, res, next) => {
+  try {
+    const { document_ids, tags } = req.body;
+    if (!Array.isArray(document_ids) || !Array.isArray(tags)) {
+      return res.status(400).json({ error: 'document_ids and tags must be arrays' });
+    }
+
+    await pool.query(
+      `UPDATE documents SET tags = array_cat(COALESCE(tags, ARRAY[]::TEXT[]), $1) WHERE id = ANY($2)`,
+      [tags, document_ids]
+    );
+
+    res.json({ success: true, count: document_ids.length });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Bulk categorize
+app.post('/api/v1/documents/bulk-categorize', authenticateToken, async (req, res, next) => {
+  try {
+    const { document_ids, category } = req.body;
+    if (!Array.isArray(document_ids)) {
+      return res.status(400).json({ error: 'document_ids must be an array' });
+    }
+
+    await pool.query(
+      'UPDATE documents SET category = $1 WHERE id = ANY($2)',
+      [category, document_ids]
+    );
+
+    res.json({ success: true, count: document_ids.length });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// DOCUMENT PREVIEW
+app.get('/api/v1/documents/:id/preview', authenticateToken, async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      'SELECT file_path, mime_type, name FROM documents WHERE id = $1',
+      [req.params.id]
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
+
+    const { file_path, mime_type, name } = result.rows[0];
+    res.setHeader('Content-Type', mime_type);
+    res.setHeader('Content-Disposition', `inline; filename="${name}"`);
+    res.sendFile(path.resolve(file_path));
   } catch (error) {
     next(error);
   }
