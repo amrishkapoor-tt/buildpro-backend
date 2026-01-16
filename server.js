@@ -3385,22 +3385,22 @@ app.get('/api/v1/projects/:projectId/analytics', authenticateToken, requireProje
       documents, rfis, drawings, photos, submittals, dailyLogs, punchItems,
       budgetLines, commitments, changeOrders, tasks, milestones, members
     ] = await Promise.all([
-      pool.query('SELECT COUNT(*) FROM documents WHERE project_id = $1', [projectId]),
+      pool.query('SELECT COUNT(*) as count FROM documents WHERE project_id = $1', [projectId]),
       pool.query('SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = $2) as open FROM rfis WHERE project_id = $1', [projectId, 'open']),
-      pool.query('SELECT COUNT(*) FROM drawing_sheets WHERE drawing_set_id IN (SELECT id FROM drawing_sets WHERE project_id = $1)', [projectId]),
-      pool.query('SELECT COUNT(*) FROM photos WHERE album_id IN (SELECT id FROM photo_albums WHERE project_id = $1)', [projectId]),
+      pool.query('SELECT COUNT(*) as count FROM drawing_sheets WHERE drawing_set_id IN (SELECT id FROM drawing_sets WHERE project_id = $1)', [projectId]),
+      pool.query('SELECT COUNT(*) as count FROM photos WHERE album_id IN (SELECT id FROM photo_albums WHERE project_id = $1)', [projectId]),
       pool.query('SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = $2) as pending FROM submittals WHERE package_id IN (SELECT id FROM submittal_packages WHERE project_id = $1)', [projectId, 'pending_review']),
-      pool.query('SELECT COUNT(*) FROM daily_logs WHERE project_id = $1', [projectId]),
+      pool.query('SELECT COUNT(*) as count FROM daily_logs WHERE project_id = $1', [projectId]),
       pool.query('SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = $2) as open FROM punch_items WHERE project_id = $1', [projectId, 'open']),
-      pool.query('SELECT COUNT(*), COALESCE(SUM(budget_amount), 0) as total_budget FROM budget_lines WHERE project_id = $1', [projectId]),
-      pool.query('SELECT COUNT(*), COALESCE(SUM(amount), 0) as total_committed FROM commitments WHERE project_id = $1', [projectId]),
-      pool.query('SELECT COUNT(*), COALESCE(SUM(amount), 0) as total_changes FROM change_orders WHERE project_id = $1 AND status = $2', [projectId, 'approved']),
+      pool.query('SELECT COUNT(*) as count, COALESCE(SUM(budget_amount), 0) as total_budget FROM budget_lines WHERE project_id = $1', [projectId]),
+      pool.query('SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total_committed FROM commitments WHERE project_id = $1', [projectId]),
+      pool.query('SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total_changes FROM change_orders WHERE project_id = $1 AND status = $2', [projectId, 'approved']),
       pool.query(`SELECT COUNT(*) as total,
                   COUNT(*) FILTER (WHERE status = 'completed') as completed,
                   COUNT(*) FILTER (WHERE status = 'in_progress') as in_progress
                   FROM schedule_tasks WHERE project_id = $1`, [projectId]),
       pool.query('SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = $2) as achieved FROM schedule_milestones WHERE project_id = $1', [projectId, 'achieved']),
-      pool.query('SELECT COUNT(*) FROM project_members WHERE project_id = $1', [projectId])
+      pool.query('SELECT COUNT(*) as count FROM project_members WHERE project_id = $1', [projectId])
     ]);
 
     const analytics = {
@@ -3469,7 +3469,9 @@ app.get('/api/v1/projects/:projectId/activity', authenticateToken, requireProjec
     // Get recent system events
     const result = await pool.query(
       `SELECT se.id, se.event_type, se.entity_type, se.entity_id, se.description,
-              se.created_at, u.name as user_name, u.email as user_email
+              se.created_at,
+              COALESCE(u.first_name || ' ' || u.last_name, u.email) as user_name,
+              u.email as user_email
        FROM system_events se
        LEFT JOIN users u ON se.user_id = u.id
        WHERE se.project_id = $1
@@ -3492,7 +3494,7 @@ app.get('/api/v1/projects/:projectId/recent-documents', authenticateToken, requi
 
     const result = await pool.query(
       `SELECT d.id, d.name, d.category, d.file_size, d.created_at,
-              u.name as uploaded_by_name
+              COALESCE(u.first_name || ' ' || u.last_name, u.email) as uploaded_by_name
        FROM documents d
        LEFT JOIN users u ON d.uploaded_by = u.id
        WHERE d.project_id = $1
@@ -3541,7 +3543,7 @@ app.get('/api/v1/projects/:projectId/open-rfis', authenticateToken, requireProje
 
     const result = await pool.query(
       `SELECT r.id, r.rfi_number, r.subject, r.priority, r.status, r.created_at,
-              u.name as created_by_name,
+              COALESCE(u.first_name || ' ' || u.last_name, u.email) as created_by_name,
               (SELECT COUNT(*) FROM rfi_responses WHERE rfi_id = r.id) as response_count
        FROM rfis r
        LEFT JOIN users u ON r.created_by = u.id
@@ -3573,7 +3575,7 @@ app.get('/api/v1/projects/:projectId/open-punch', authenticateToken, requireProj
     const result = await pool.query(
       `SELECT pi.id, pi.item_number, pi.description, pi.priority, pi.status,
               pi.due_date, pi.created_at,
-              u.name as assigned_to_name
+              COALESCE(u.first_name || ' ' || u.last_name, u.email) as assigned_to_name
        FROM punch_items pi
        LEFT JOIN users u ON pi.assigned_to = u.id
        WHERE pi.project_id = $1 AND pi.status IN ('open', 'in_progress')
