@@ -3695,6 +3695,62 @@ app.use((err, req, res, next) => {
   });
 });
 
+// ============================================================================
+// MIGRATION ENDPOINT - Run database migrations
+// ============================================================================
+app.post('/api/v1/admin/run-migration', authenticateToken, async (req, res) => {
+  try {
+    const { migrationName } = req.body;
+
+    if (!migrationName) {
+      return res.status(400).json({ error: 'Migration name required' });
+    }
+
+    // Only allow specific migrations
+    const allowedMigrations = [
+      '001_documents_enhancement.sql',
+      '006_scheduling_system.sql'
+    ];
+
+    if (!allowedMigrations.includes(migrationName)) {
+      return res.status(400).json({ error: 'Invalid migration name' });
+    }
+
+    const migrationPath = path.join(__dirname, 'migrations', migrationName);
+    if (!fs.existsSync(migrationPath)) {
+      return res.status(404).json({ error: 'Migration file not found' });
+    }
+
+    console.log(`🔄 Running migration: ${migrationName}`);
+    const sql = fs.readFileSync(migrationPath, 'utf8');
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(sql);
+      await client.query('COMMIT');
+
+      console.log(`✅ Migration completed: ${migrationName}`);
+      res.json({
+        success: true,
+        message: `Migration ${migrationName} completed successfully`
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error(`❌ Migration failed: ${migrationName}`, error);
+      res.status(500).json({
+        error: 'Migration failed',
+        details: error.message
+      });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Migration endpoint error:', error);
+    res.status(500).json({ error: 'Migration failed', details: error.message });
+  }
+});
+
 // START SERVER
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ BuildPro API (Complete) running on port ${PORT}`);
