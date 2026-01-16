@@ -1015,19 +1015,37 @@ app.post('/api/v1/documents/bulk-categorize', authenticateToken, async (req, res
 });
 
 // DOCUMENT PREVIEW
-app.get('/api/v1/documents/:id/preview', authenticateToken, async (req, res, next) => {
+app.get('/api/v1/documents/:id/preview', async (req, res, next) => {
   try {
-    const result = await pool.query(
-      'SELECT file_path, mime_type, name FROM documents WHERE id = $1',
-      [req.params.id]
-    );
+    // Support token in query parameter for iframe/img tag loading
+    const token = req.query.token || (req.headers['authorization'] && req.headers['authorization'].split(' ')[1]);
 
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
+    if (!token) {
+      return res.status(401).json({ error: 'Access token required' });
+    }
 
-    const { file_path, mime_type, name } = result.rows[0];
-    res.setHeader('Content-Type', mime_type);
-    res.setHeader('Content-Disposition', `inline; filename="${name}"`);
-    res.sendFile(path.resolve(file_path));
+    // Verify token
+    jwt.verify(token, JWT_SECRET, async (err, user) => {
+      if (err) {
+        return res.status(403).json({ error: 'Invalid token' });
+      }
+
+      try {
+        const result = await pool.query(
+          'SELECT file_path, mime_type, name FROM documents WHERE id = $1',
+          [req.params.id]
+        );
+
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
+
+        const { file_path, mime_type, name } = result.rows[0];
+        res.setHeader('Content-Type', mime_type);
+        res.setHeader('Content-Disposition', `inline; filename="${name}"`);
+        res.sendFile(path.resolve(file_path));
+      } catch (error) {
+        next(error);
+      }
+    });
   } catch (error) {
     next(error);
   }
