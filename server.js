@@ -3379,92 +3379,157 @@ app.get('/api/v1/projects/:projectId/schedule/impacts', authenticateToken, async
 app.get('/api/v1/projects/:projectId/analytics', authenticateToken, requireProjectMember, async (req, res, next) => {
   try {
     const { projectId } = req.params;
-
-    // Get counts for all modules
-    const [
-      documents, rfis, drawings, photos, submittals, dailyLogs, punchItems,
-      budgetLines, commitments, changeOrders, tasks, milestones, members
-    ] = await Promise.all([
-      pool.query('SELECT COUNT(*) as count FROM documents WHERE project_id = $1', [projectId]),
-      pool.query(`SELECT COUNT(*) as total,
-                  COALESCE(SUM(CASE WHEN status = $2 THEN 1 ELSE 0 END), 0) as open
-                  FROM rfis WHERE project_id = $1`, [projectId, 'open']),
-      pool.query('SELECT COUNT(*) as count FROM drawing_sheets WHERE drawing_set_id IN (SELECT id FROM drawing_sets WHERE project_id = $1)', [projectId]),
-      pool.query('SELECT COUNT(*) as count FROM photos WHERE album_id IN (SELECT id FROM photo_albums WHERE project_id = $1)', [projectId]),
-      pool.query(`SELECT COUNT(*) as total,
-                  COALESCE(SUM(CASE WHEN status = $2 THEN 1 ELSE 0 END), 0) as pending
-                  FROM submittals WHERE package_id IN (SELECT id FROM submittal_packages WHERE project_id = $1)`, [projectId, 'pending_review']),
-      pool.query('SELECT COUNT(*) as count FROM daily_logs WHERE project_id = $1', [projectId]),
-      pool.query(`SELECT COUNT(*) as total,
-                  COALESCE(SUM(CASE WHEN status = $2 THEN 1 ELSE 0 END), 0) as open
-                  FROM punch_items WHERE project_id = $1`, [projectId, 'open']),
-      pool.query('SELECT COUNT(*) as count, COALESCE(SUM(budget_amount), 0) as total_budget FROM budget_lines WHERE project_id = $1', [projectId]),
-      pool.query('SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total_committed FROM commitments WHERE project_id = $1', [projectId]),
-      pool.query('SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total_changes FROM change_orders WHERE project_id = $1 AND status = $2', [projectId, 'approved']),
-      pool.query(`SELECT COUNT(*) as total,
-                  COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) as completed,
-                  COALESCE(SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END), 0) as in_progress
-                  FROM schedule_tasks WHERE project_id = $1`, [projectId]),
-      pool.query(`SELECT COUNT(*) as total,
-                  COALESCE(SUM(CASE WHEN status = $2 THEN 1 ELSE 0 END), 0) as achieved
-                  FROM schedule_milestones WHERE project_id = $1`, [projectId, 'achieved']),
-      pool.query('SELECT COUNT(*) as count FROM project_members WHERE project_id = $1', [projectId])
-    ]);
+    console.log(`[Analytics] Starting analytics for project: ${projectId}`);
 
     const analytics = {
-      documents: {
-        total: parseInt(documents.rows[0].count) || 0
-      },
-      rfis: {
-        total: parseInt(rfis.rows[0].total) || 0,
-        open: parseInt(rfis.rows[0].open) || 0,
-        closed: (parseInt(rfis.rows[0].total) || 0) - (parseInt(rfis.rows[0].open) || 0)
-      },
-      drawings: {
-        total: parseInt(drawings.rows[0].count) || 0
-      },
-      photos: {
-        total: parseInt(photos.rows[0].count) || 0
-      },
-      submittals: {
-        total: parseInt(submittals.rows[0].total) || 0,
-        pending: parseInt(submittals.rows[0].pending) || 0
-      },
-      dailyLogs: {
-        total: parseInt(dailyLogs.rows[0].count) || 0
-      },
-      punchList: {
-        total: parseInt(punchItems.rows[0].total) || 0,
-        open: parseInt(punchItems.rows[0].open) || 0,
-        closed: (parseInt(punchItems.rows[0].total) || 0) - (parseInt(punchItems.rows[0].open) || 0)
-      },
-      financials: {
-        budgetLines: parseInt(budgetLines.rows[0].count) || 0,
-        totalBudget: parseFloat(budgetLines.rows[0].total_budget) || 0,
-        commitments: parseInt(commitments.rows[0].count) || 0,
-        totalCommitted: parseFloat(commitments.rows[0].total_committed) || 0,
-        changeOrders: parseInt(changeOrders.rows[0].count) || 0,
-        totalChanges: parseFloat(changeOrders.rows[0].total_changes) || 0,
-        remainingBudget: (parseFloat(budgetLines.rows[0].total_budget) || 0) - (parseFloat(commitments.rows[0].total_committed) || 0)
-      },
-      schedule: {
-        totalTasks: parseInt(tasks.rows[0].total) || 0,
-        completedTasks: parseInt(tasks.rows[0].completed) || 0,
-        inProgressTasks: parseInt(tasks.rows[0].in_progress) || 0,
-        completionPercentage: (parseInt(tasks.rows[0].total) || 0) > 0
-          ? Math.round(((parseInt(tasks.rows[0].completed) || 0) / parseInt(tasks.rows[0].total)) * 100)
-          : 0,
-        milestones: parseInt(milestones.rows[0].total) || 0,
-        achievedMilestones: parseInt(milestones.rows[0].achieved) || 0
-      },
-      team: {
-        members: parseInt(members.rows[0].count) || 0
-      }
+      documents: { total: 0 },
+      rfis: { total: 0, open: 0, closed: 0 },
+      drawings: { total: 0 },
+      photos: { total: 0 },
+      submittals: { total: 0, pending: 0 },
+      dailyLogs: { total: 0 },
+      punchList: { total: 0, open: 0, closed: 0 },
+      financials: { budgetLines: 0, totalBudget: 0, commitments: 0, totalCommitted: 0, changeOrders: 0, totalChanges: 0, remainingBudget: 0 },
+      schedule: { totalTasks: 0, completedTasks: 0, inProgressTasks: 0, completionPercentage: 0, milestones: 0, achievedMilestones: 0 },
+      team: { members: 0 }
     };
 
+    // Query each module individually with error handling
+    try {
+      const documents = await pool.query('SELECT COUNT(*) as count FROM documents WHERE project_id = $1', [projectId]);
+      analytics.documents.total = parseInt(documents.rows[0].count) || 0;
+      console.log('[Analytics] Documents query succeeded');
+    } catch (e) {
+      console.error('[Analytics] Documents query failed:', e.message);
+    }
+
+    try {
+      const rfis = await pool.query(`SELECT COUNT(*) as total,
+                COALESCE(SUM(CASE WHEN status = $2 THEN 1 ELSE 0 END), 0) as open
+                FROM rfis WHERE project_id = $1`, [projectId, 'open']);
+      analytics.rfis.total = parseInt(rfis.rows[0].total) || 0;
+      analytics.rfis.open = parseInt(rfis.rows[0].open) || 0;
+      analytics.rfis.closed = analytics.rfis.total - analytics.rfis.open;
+      console.log('[Analytics] RFIs query succeeded');
+    } catch (e) {
+      console.error('[Analytics] RFIs query failed:', e.message);
+    }
+
+    try {
+      const drawings = await pool.query('SELECT COUNT(*) as count FROM drawing_sheets WHERE drawing_set_id IN (SELECT id FROM drawing_sets WHERE project_id = $1)', [projectId]);
+      analytics.drawings.total = parseInt(drawings.rows[0].count) || 0;
+      console.log('[Analytics] Drawings query succeeded');
+    } catch (e) {
+      console.error('[Analytics] Drawings query failed:', e.message);
+    }
+
+    try {
+      const photos = await pool.query('SELECT COUNT(*) as count FROM photos WHERE album_id IN (SELECT id FROM photo_albums WHERE project_id = $1)', [projectId]);
+      analytics.photos.total = parseInt(photos.rows[0].count) || 0;
+      console.log('[Analytics] Photos query succeeded');
+    } catch (e) {
+      console.error('[Analytics] Photos query failed:', e.message);
+    }
+
+    try {
+      const submittals = await pool.query(`SELECT COUNT(*) as total,
+                COALESCE(SUM(CASE WHEN status = $2 THEN 1 ELSE 0 END), 0) as pending
+                FROM submittals WHERE package_id IN (SELECT id FROM submittal_packages WHERE project_id = $1)`, [projectId, 'pending_review']);
+      analytics.submittals.total = parseInt(submittals.rows[0].total) || 0;
+      analytics.submittals.pending = parseInt(submittals.rows[0].pending) || 0;
+      console.log('[Analytics] Submittals query succeeded');
+    } catch (e) {
+      console.error('[Analytics] Submittals query failed:', e.message);
+    }
+
+    try {
+      const dailyLogs = await pool.query('SELECT COUNT(*) as count FROM daily_logs WHERE project_id = $1', [projectId]);
+      analytics.dailyLogs.total = parseInt(dailyLogs.rows[0].count) || 0;
+      console.log('[Analytics] Daily logs query succeeded');
+    } catch (e) {
+      console.error('[Analytics] Daily logs query failed:', e.message);
+    }
+
+    try {
+      const punchItems = await pool.query(`SELECT COUNT(*) as total,
+                COALESCE(SUM(CASE WHEN status = $2 THEN 1 ELSE 0 END), 0) as open
+                FROM punch_items WHERE project_id = $1`, [projectId, 'open']);
+      analytics.punchList.total = parseInt(punchItems.rows[0].total) || 0;
+      analytics.punchList.open = parseInt(punchItems.rows[0].open) || 0;
+      analytics.punchList.closed = analytics.punchList.total - analytics.punchList.open;
+      console.log('[Analytics] Punch items query succeeded');
+    } catch (e) {
+      console.error('[Analytics] Punch items query failed:', e.message);
+    }
+
+    try {
+      const budgetLines = await pool.query('SELECT COUNT(*) as count, COALESCE(SUM(budget_amount), 0) as total_budget FROM budget_lines WHERE project_id = $1', [projectId]);
+      analytics.financials.budgetLines = parseInt(budgetLines.rows[0].count) || 0;
+      analytics.financials.totalBudget = parseFloat(budgetLines.rows[0].total_budget) || 0;
+      console.log('[Analytics] Budget lines query succeeded');
+    } catch (e) {
+      console.error('[Analytics] Budget lines query failed:', e.message);
+    }
+
+    try {
+      const commitments = await pool.query('SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total_committed FROM commitments WHERE project_id = $1', [projectId]);
+      analytics.financials.commitments = parseInt(commitments.rows[0].count) || 0;
+      analytics.financials.totalCommitted = parseFloat(commitments.rows[0].total_committed) || 0;
+      console.log('[Analytics] Commitments query succeeded');
+    } catch (e) {
+      console.error('[Analytics] Commitments query failed:', e.message);
+    }
+
+    try {
+      const changeOrders = await pool.query('SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total_changes FROM change_orders WHERE project_id = $1 AND status = $2', [projectId, 'approved']);
+      analytics.financials.changeOrders = parseInt(changeOrders.rows[0].count) || 0;
+      analytics.financials.totalChanges = parseFloat(changeOrders.rows[0].total_changes) || 0;
+      analytics.financials.remainingBudget = analytics.financials.totalBudget - analytics.financials.totalCommitted;
+      console.log('[Analytics] Change orders query succeeded');
+    } catch (e) {
+      console.error('[Analytics] Change orders query failed:', e.message);
+    }
+
+    try {
+      const tasks = await pool.query(`SELECT COUNT(*) as total,
+                COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) as completed,
+                COALESCE(SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END), 0) as in_progress
+                FROM schedule_tasks WHERE project_id = $1`, [projectId]);
+      analytics.schedule.totalTasks = parseInt(tasks.rows[0].total) || 0;
+      analytics.schedule.completedTasks = parseInt(tasks.rows[0].completed) || 0;
+      analytics.schedule.inProgressTasks = parseInt(tasks.rows[0].in_progress) || 0;
+      analytics.schedule.completionPercentage = analytics.schedule.totalTasks > 0
+        ? Math.round((analytics.schedule.completedTasks / analytics.schedule.totalTasks) * 100)
+        : 0;
+      console.log('[Analytics] Schedule tasks query succeeded');
+    } catch (e) {
+      console.error('[Analytics] Schedule tasks query failed:', e.message);
+    }
+
+    try {
+      const milestones = await pool.query(`SELECT COUNT(*) as total,
+                COALESCE(SUM(CASE WHEN status = $2 THEN 1 ELSE 0 END), 0) as achieved
+                FROM schedule_milestones WHERE project_id = $1`, [projectId, 'achieved']);
+      analytics.schedule.milestones = parseInt(milestones.rows[0].total) || 0;
+      analytics.schedule.achievedMilestones = parseInt(milestones.rows[0].achieved) || 0;
+      console.log('[Analytics] Milestones query succeeded');
+    } catch (e) {
+      console.error('[Analytics] Milestones query failed:', e.message);
+    }
+
+    try {
+      const members = await pool.query('SELECT COUNT(*) as count FROM project_members WHERE project_id = $1', [projectId]);
+      analytics.team.members = parseInt(members.rows[0].count) || 0;
+      console.log('[Analytics] Project members query succeeded');
+    } catch (e) {
+      console.error('[Analytics] Project members query failed:', e.message);
+    }
+
+    console.log('[Analytics] Completed analytics query successfully');
     res.json({ analytics });
   } catch (error) {
-    next(error);
+    console.error('[Analytics] Fatal error:', error.message, error.stack);
+    res.status(500).json({ error: 'Analytics query failed', details: error.message });
   }
 });
 
@@ -3473,6 +3538,7 @@ app.get('/api/v1/projects/:projectId/activity', authenticateToken, requireProjec
   try {
     const { projectId } = req.params;
     const limit = parseInt(req.query.limit) || 20;
+    console.log(`[Activity] Starting activity query for project: ${projectId}, limit: ${limit}`);
 
     // Get recent system events
     const result = await pool.query(
@@ -3488,9 +3554,11 @@ app.get('/api/v1/projects/:projectId/activity', authenticateToken, requireProjec
       [projectId, limit]
     );
 
+    console.log(`[Activity] Query succeeded, found ${result.rows.length} events`);
     res.json({ activity: result.rows });
   } catch (error) {
-    next(error);
+    console.error('[Activity] Query failed:', error.message, error.stack);
+    res.status(500).json({ error: 'Activity query failed', details: error.message, activity: [] });
   }
 });
 
@@ -3499,6 +3567,7 @@ app.get('/api/v1/projects/:projectId/recent-documents', authenticateToken, requi
   try {
     const { projectId } = req.params;
     const limit = parseInt(req.query.limit) || 5;
+    console.log(`[Recent Docs] Starting recent documents query for project: ${projectId}, limit: ${limit}`);
 
     const result = await pool.query(
       `SELECT d.id, d.name, d.category, d.file_size, d.created_at,
@@ -3511,9 +3580,11 @@ app.get('/api/v1/projects/:projectId/recent-documents', authenticateToken, requi
       [projectId, limit]
     );
 
+    console.log(`[Recent Docs] Query succeeded, found ${result.rows.length} documents`);
     res.json({ documents: result.rows });
   } catch (error) {
-    next(error);
+    console.error('[Recent Docs] Query failed:', error.message, error.stack);
+    res.status(500).json({ error: 'Recent documents query failed', details: error.message, documents: [] });
   }
 });
 
@@ -3523,6 +3594,7 @@ app.get('/api/v1/projects/:projectId/upcoming-tasks', authenticateToken, require
     const { projectId } = req.params;
     const days = parseInt(req.query.days) || 7;
     const limit = parseInt(req.query.limit) || 5;
+    console.log(`[Upcoming Tasks] Starting query for project: ${projectId}, days: ${days}, limit: ${limit}`);
 
     const result = await pool.query(
       `SELECT st.id, st.name, st.status, st.planned_start_date, st.planned_end_date,
@@ -3537,9 +3609,11 @@ app.get('/api/v1/projects/:projectId/upcoming-tasks', authenticateToken, require
       [projectId, days, limit]
     );
 
+    console.log(`[Upcoming Tasks] Query succeeded, found ${result.rows.length} tasks`);
     res.json({ tasks: result.rows });
   } catch (error) {
-    next(error);
+    console.error('[Upcoming Tasks] Query failed:', error.message, error.stack);
+    res.status(500).json({ error: 'Upcoming tasks query failed', details: error.message, tasks: [] });
   }
 });
 
@@ -3548,6 +3622,7 @@ app.get('/api/v1/projects/:projectId/open-rfis', authenticateToken, requireProje
   try {
     const { projectId } = req.params;
     const limit = parseInt(req.query.limit) || 5;
+    console.log(`[Open RFIs] Starting query for project: ${projectId}, limit: ${limit}`);
 
     const result = await pool.query(
       `SELECT r.id, r.rfi_number, r.subject, r.priority, r.status, r.created_at,
@@ -3568,9 +3643,11 @@ app.get('/api/v1/projects/:projectId/open-rfis', authenticateToken, requireProje
       [projectId, limit]
     );
 
+    console.log(`[Open RFIs] Query succeeded, found ${result.rows.length} RFIs`);
     res.json({ rfis: result.rows });
   } catch (error) {
-    next(error);
+    console.error('[Open RFIs] Query failed:', error.message, error.stack);
+    res.status(500).json({ error: 'Open RFIs query failed', details: error.message, rfis: [] });
   }
 });
 
@@ -3579,6 +3656,7 @@ app.get('/api/v1/projects/:projectId/open-punch', authenticateToken, requireProj
   try {
     const { projectId } = req.params;
     const limit = parseInt(req.query.limit) || 5;
+    console.log(`[Open Punch] Starting query for project: ${projectId}, limit: ${limit}`);
 
     const result = await pool.query(
       `SELECT pi.id, pi.item_number, pi.description, pi.priority, pi.status,
@@ -3600,9 +3678,11 @@ app.get('/api/v1/projects/:projectId/open-punch', authenticateToken, requireProj
       [projectId, limit]
     );
 
+    console.log(`[Open Punch] Query succeeded, found ${result.rows.length} punch items`);
     res.json({ punchItems: result.rows });
   } catch (error) {
-    next(error);
+    console.error('[Open Punch] Query failed:', error.message, error.stack);
+    res.status(500).json({ error: 'Open punch items query failed', details: error.message, punchItems: [] });
   }
 });
 
