@@ -24,7 +24,8 @@ BuildPro is a full-featured construction management system designed to help cons
 - **Framework**: Express.js 5
 - **Database**: PostgreSQL 14+
 - **Authentication**: JWT (jsonwebtoken)
-- **File Uploads**: Multer
+- **File Uploads**: Multer (with pluggable storage)
+- **Cloud Storage**: AWS S3 (optional, for production)
 - **Password Hashing**: bcrypt
 
 ## Getting Started
@@ -56,7 +57,7 @@ BuildPro is a full-featured construction management system designed to help cons
    ```
 
 4. **Configure environment variables**
-   
+
    Create a `.env` file in the root directory:
    ```env
    PORT=3001
@@ -64,6 +65,10 @@ BuildPro is a full-featured construction management system designed to help cons
    DATABASE_URL=postgresql://username:password@localhost:5432/buildpro
    JWT_SECRET=your-secret-key-change-in-production
    CORS_ORIGIN=http://localhost:3000
+
+   # Storage Configuration (optional - defaults to local)
+   STORAGE_TYPE=local
+   LOCAL_STORAGE_PATH=./uploads
    ```
 
 5. **Start the server**
@@ -78,16 +83,112 @@ BuildPro is a full-featured construction management system designed to help cons
 
 The API will be available at `http://localhost:3001`.
 
+## Storage Configuration
+
+BuildPro supports pluggable storage backends for file uploads (documents, photos, drawings). You can switch between local disk storage and cloud storage (AWS S3) without changing code.
+
+### Local Storage (Default)
+
+**Best for**: Development, testing, local environments
+
+Local storage stores files on the server's filesystem. This is the default mode and requires no configuration.
+
+**Pros**:
+- Zero setup and cost
+- Fast performance
+- Simple for development
+
+**Cons**:
+- Files lost on server restarts (ephemeral platforms like Render)
+- No automatic backups
+- Not scalable for production
+
+**Configuration** (optional - this is the default):
+```env
+STORAGE_TYPE=local
+LOCAL_STORAGE_PATH=./uploads
+```
+
+### AWS S3 Storage
+
+**Best for**: Production deployments, persistent file storage
+
+S3 storage provides durable, scalable cloud storage for production use.
+
+**Pros**:
+- Files persist across deployments and restarts
+- 99.999999999% durability
+- Scalable and globally distributed
+- Automatic backups available
+
+**Cons**:
+- Requires AWS account
+- Ongoing costs (~$0.023/GB/month)
+
+**Setup Instructions**:
+
+1. **Create an S3 bucket** in AWS:
+   - Bucket name: `buildpro-production-files` (must be globally unique)
+   - Region: `us-east-1` (or your preferred region)
+   - Block all public access: YES (we use signed URLs)
+
+2. **Configure CORS** on your bucket:
+   ```json
+   [
+     {
+       "AllowedHeaders": ["*"],
+       "AllowedMethods": ["GET", "HEAD"],
+       "AllowedOrigins": ["https://yourdomain.com"],
+       "ExposeHeaders": ["ETag"],
+       "MaxAgeSeconds": 3000
+     }
+   ]
+   ```
+
+3. **Create IAM user** with S3 permissions:
+   - Create user: `buildpro-storage`
+   - Attach policy with `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`, `s3:ListBucket`
+   - Save Access Key ID and Secret Access Key
+
+4. **Set environment variables**:
+   ```env
+   STORAGE_TYPE=s3
+   AWS_S3_BUCKET=buildpro-production-files
+   AWS_REGION=us-east-1
+   AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+   AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+   SIGNED_URL_EXPIRY=3600
+   ```
+
+**For detailed setup instructions**, see:
+- `.env.production.template` - Production configuration template
+- `storage/README.md` - Complete storage system documentation
+
+**Health Check**: Monitor storage connectivity at `/api/v1/storage/health`
+
+**Cost Estimate**: For typical usage (5GB storage, 1000 uploads, 500 downloads per month), expect ~$0.35/month.
+
 ## Project Structure
 
 ```
 buildpro-backend/
-├── server.js          # Main application entry point
-├── schema.sql         # PostgreSQL database schema
-├── package.json       # Dependencies and scripts
-├── .env               # Environment variables (create this)
-├── .gitignore         # Git ignore rules
-└── uploads/           # File upload directory (created automatically)
+├── server.js                      # Main application entry point
+├── schema.sql                     # PostgreSQL database schema
+├── package.json                   # Dependencies and scripts
+├── .env                           # Environment variables (create this)
+├── .env.development               # Development config template
+├── .env.production.template       # Production config template with S3 setup
+├── .gitignore                     # Git ignore rules
+├── storage/                       # Storage abstraction layer
+│   ├── index.js                   # Storage factory
+│   ├── StorageProvider.js         # Base provider interface
+│   ├── LocalStorageProvider.js    # Local disk storage
+│   ├── S3StorageProvider.js       # AWS S3 storage
+│   ├── config.js                  # Configuration validation
+│   └── README.md                  # Detailed storage documentation
+├── middleware/                    # Custom middleware
+│   └── upload.js                  # Multer upload configuration
+└── uploads/                       # Local file storage (created automatically)
 ```
 
 ### server.js Overview
@@ -237,6 +338,7 @@ Please use GitHub Issues to report bugs or request features. Include:
 
 ### Environment Variables for Production
 
+**Required**:
 ```env
 NODE_ENV=production
 DATABASE_URL=your-production-database-url
@@ -244,10 +346,30 @@ JWT_SECRET=strong-random-secret
 CORS_ORIGIN=https://your-frontend-domain.com
 ```
 
+**Storage Configuration** (choose one):
+
+**Option 1: Local Storage** (not recommended - files lost on restart):
+```env
+STORAGE_TYPE=local
+LOCAL_STORAGE_PATH=./uploads
+```
+
+**Option 2: AWS S3 Storage** (recommended - persistent storage):
+```env
+STORAGE_TYPE=s3
+AWS_S3_BUCKET=buildpro-production-files
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=your-access-key
+AWS_SECRET_ACCESS_KEY=your-secret-key
+SIGNED_URL_EXPIRY=3600
+```
+
+See `.env.production.template` for complete setup instructions.
+
 ## Known Limitations
 
-- **File Storage**: Currently uses local filesystem storage which doesn't persist on ephemeral hosts like Render's free tier. For production, integrate cloud storage (S3, Supabase Storage, etc.)
 - **Real-time Updates**: No WebSocket support yet; clients must poll for updates
+- **Storage Providers**: Currently supports local disk and AWS S3. Additional providers (Google Cloud Storage, Azure Blob Storage) can be added following the plugin architecture in `storage/`
 
 ## License
 
