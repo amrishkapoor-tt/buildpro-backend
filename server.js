@@ -3347,6 +3347,231 @@ app.get('/api/v1/projects/:projectId/schedule/impacts', authenticateToken, async
   }
 });
 
+// ============================================================================
+// ANALYTICS & DASHBOARD ENDPOINTS
+// ============================================================================
+
+// Get comprehensive project analytics
+app.get('/api/v1/projects/:projectId/analytics', authenticateToken, requireProjectMember, async (req, res, next) => {
+  try {
+    const { projectId } = req.params;
+
+    // Get counts for all modules
+    const [
+      documents, rfis, drawings, photos, submittals, dailyLogs, punchItems,
+      budgetLines, commitments, changeOrders, tasks, milestones, members
+    ] = await Promise.all([
+      pool.query('SELECT COUNT(*) FROM documents WHERE project_id = $1', [projectId]),
+      pool.query('SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = $2) as open FROM rfis WHERE project_id = $1', [projectId, 'open']),
+      pool.query('SELECT COUNT(*) FROM drawing_sheets WHERE drawing_set_id IN (SELECT id FROM drawing_sets WHERE project_id = $1)', [projectId]),
+      pool.query('SELECT COUNT(*) FROM photos WHERE album_id IN (SELECT id FROM photo_albums WHERE project_id = $1)', [projectId]),
+      pool.query('SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = $2) as pending FROM submittals WHERE package_id IN (SELECT id FROM submittal_packages WHERE project_id = $1)', [projectId, 'pending_review']),
+      pool.query('SELECT COUNT(*) FROM daily_logs WHERE project_id = $1', [projectId]),
+      pool.query('SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = $2) as open FROM punch_items WHERE project_id = $1', [projectId, 'open']),
+      pool.query('SELECT COUNT(*), COALESCE(SUM(budget_amount), 0) as total_budget FROM budget_lines WHERE project_id = $1', [projectId]),
+      pool.query('SELECT COUNT(*), COALESCE(SUM(amount), 0) as total_committed FROM commitments WHERE project_id = $1', [projectId]),
+      pool.query('SELECT COUNT(*), COALESCE(SUM(amount), 0) as total_changes FROM change_orders WHERE project_id = $1 AND status = $2', [projectId, 'approved']),
+      pool.query(`SELECT COUNT(*) as total,
+                  COUNT(*) FILTER (WHERE status = 'completed') as completed,
+                  COUNT(*) FILTER (WHERE status = 'in_progress') as in_progress
+                  FROM schedule_tasks WHERE project_id = $1`, [projectId]),
+      pool.query('SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = $2) as achieved FROM schedule_milestones WHERE project_id = $1', [projectId, 'achieved']),
+      pool.query('SELECT COUNT(*) FROM project_members WHERE project_id = $1', [projectId])
+    ]);
+
+    const analytics = {
+      documents: {
+        total: parseInt(documents.rows[0].count)
+      },
+      rfis: {
+        total: parseInt(rfis.rows[0].total),
+        open: parseInt(rfis.rows[0].open),
+        closed: parseInt(rfis.rows[0].total) - parseInt(rfis.rows[0].open)
+      },
+      drawings: {
+        total: parseInt(drawings.rows[0].count)
+      },
+      photos: {
+        total: parseInt(photos.rows[0].count)
+      },
+      submittals: {
+        total: parseInt(submittals.rows[0].total),
+        pending: parseInt(submittals.rows[0].pending)
+      },
+      dailyLogs: {
+        total: parseInt(dailyLogs.rows[0].count)
+      },
+      punchList: {
+        total: parseInt(punchItems.rows[0].total),
+        open: parseInt(punchItems.rows[0].open),
+        closed: parseInt(punchItems.rows[0].total) - parseInt(punchItems.rows[0].open)
+      },
+      financials: {
+        budgetLines: parseInt(budgetLines.rows[0].count),
+        totalBudget: parseFloat(budgetLines.rows[0].total_budget),
+        commitments: parseInt(commitments.rows[0].count),
+        totalCommitted: parseFloat(commitments.rows[0].total_committed),
+        changeOrders: parseInt(changeOrders.rows[0].count),
+        totalChanges: parseFloat(changeOrders.rows[0].total_changes),
+        remainingBudget: parseFloat(budgetLines.rows[0].total_budget) - parseFloat(commitments.rows[0].total_committed)
+      },
+      schedule: {
+        totalTasks: parseInt(tasks.rows[0].total),
+        completedTasks: parseInt(tasks.rows[0].completed),
+        inProgressTasks: parseInt(tasks.rows[0].in_progress),
+        completionPercentage: parseInt(tasks.rows[0].total) > 0
+          ? Math.round((parseInt(tasks.rows[0].completed) / parseInt(tasks.rows[0].total)) * 100)
+          : 0,
+        milestones: parseInt(milestones.rows[0].total),
+        achievedMilestones: parseInt(milestones.rows[0].achieved)
+      },
+      team: {
+        members: parseInt(members.rows[0].count)
+      }
+    };
+
+    res.json({ analytics });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get recent activity across all modules
+app.get('/api/v1/projects/:projectId/activity', authenticateToken, requireProjectMember, async (req, res, next) => {
+  try {
+    const { projectId } = req.params;
+    const limit = parseInt(req.query.limit) || 20;
+
+    // Get recent system events
+    const result = await pool.query(
+      `SELECT se.id, se.event_type, se.entity_type, se.entity_id, se.description,
+              se.created_at, u.name as user_name, u.email as user_email
+       FROM system_events se
+       LEFT JOIN users u ON se.user_id = u.id
+       WHERE se.project_id = $1
+       ORDER BY se.created_at DESC
+       LIMIT $2`,
+      [projectId, limit]
+    );
+
+    res.json({ activity: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get recent documents
+app.get('/api/v1/projects/:projectId/recent-documents', authenticateToken, requireProjectMember, async (req, res, next) => {
+  try {
+    const { projectId } = req.params;
+    const limit = parseInt(req.query.limit) || 5;
+
+    const result = await pool.query(
+      `SELECT d.id, d.name, d.category, d.file_size, d.created_at,
+              u.name as uploaded_by_name
+       FROM documents d
+       LEFT JOIN users u ON d.uploaded_by = u.id
+       WHERE d.project_id = $1
+       ORDER BY d.created_at DESC
+       LIMIT $2`,
+      [projectId, limit]
+    );
+
+    res.json({ documents: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get upcoming schedule tasks
+app.get('/api/v1/projects/:projectId/upcoming-tasks', authenticateToken, requireProjectMember, async (req, res, next) => {
+  try {
+    const { projectId } = req.params;
+    const days = parseInt(req.query.days) || 7;
+    const limit = parseInt(req.query.limit) || 5;
+
+    const result = await pool.query(
+      `SELECT st.id, st.name, st.status, st.planned_start_date, st.planned_end_date,
+              st.duration_days, st.priority
+       FROM schedule_tasks st
+       WHERE st.project_id = $1
+       AND st.status != 'completed'
+       AND st.planned_start_date <= CURRENT_DATE + $2 * INTERVAL '1 day'
+       AND st.planned_start_date >= CURRENT_DATE
+       ORDER BY st.planned_start_date ASC
+       LIMIT $3`,
+      [projectId, days, limit]
+    );
+
+    res.json({ tasks: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get open RFIs summary
+app.get('/api/v1/projects/:projectId/open-rfis', authenticateToken, requireProjectMember, async (req, res, next) => {
+  try {
+    const { projectId } = req.params;
+    const limit = parseInt(req.query.limit) || 5;
+
+    const result = await pool.query(
+      `SELECT r.id, r.rfi_number, r.subject, r.priority, r.status, r.created_at,
+              u.name as created_by_name,
+              (SELECT COUNT(*) FROM rfi_responses WHERE rfi_id = r.id) as response_count
+       FROM rfis r
+       LEFT JOIN users u ON r.created_by = u.id
+       WHERE r.project_id = $1 AND r.status = 'open'
+       ORDER BY
+         CASE r.priority
+           WHEN 'critical' THEN 1
+           WHEN 'high' THEN 2
+           WHEN 'medium' THEN 3
+           WHEN 'low' THEN 4
+         END,
+         r.created_at ASC
+       LIMIT $2`,
+      [projectId, limit]
+    );
+
+    res.json({ rfis: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get open punch items summary
+app.get('/api/v1/projects/:projectId/open-punch', authenticateToken, requireProjectMember, async (req, res, next) => {
+  try {
+    const { projectId } = req.params;
+    const limit = parseInt(req.query.limit) || 5;
+
+    const result = await pool.query(
+      `SELECT pi.id, pi.item_number, pi.description, pi.priority, pi.status,
+              pi.due_date, pi.created_at,
+              u.name as assigned_to_name
+       FROM punch_items pi
+       LEFT JOIN users u ON pi.assigned_to = u.id
+       WHERE pi.project_id = $1 AND pi.status IN ('open', 'in_progress')
+       ORDER BY
+         CASE pi.priority
+           WHEN 'critical' THEN 1
+           WHEN 'high' THEN 2
+           WHEN 'medium' THEN 3
+           WHEN 'low' THEN 4
+         END,
+         pi.due_date ASC NULLS LAST,
+         pi.created_at ASC
+       LIMIT $2`,
+      [projectId, limit]
+    );
+
+    res.json({ punchItems: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // ERROR HANDLER
 app.use((err, req, res, next) => {
   console.error(err.stack);
