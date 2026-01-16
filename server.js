@@ -9,10 +9,11 @@ const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
-const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
+const storage = require('./storage');
+const { upload, storageType } = require('./middleware/upload');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -38,27 +39,8 @@ pool.connect((err, client, release) => {
   }
 });
 
-const uploadDir = './uploads';
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-const upload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadDir),
-    filename: (req, file, cb) => {
-      const uniqueName = `${Date.now()}-${uuidv4()}${path.extname(file.originalname)}`;
-      cb(null, uniqueName);
-    }
-  }),
-  limits: { fileSize: 50 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    const allowedTypes = /jpeg|jpg|png|gif|pdf|doc|docx|xls|xlsx|dwg|dxf/;
-    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-    if (extname) return cb(null, true);
-    cb(new Error('Invalid file type'));
-  }
-});
+// Storage configuration moved to ./storage and ./middleware/upload
+console.log(`🗄️  Storage type: ${storageType}`);
 
 app.use(cors({
   origin: function (origin, callback) {
@@ -76,14 +58,41 @@ app.use(cors({
 }));
 
 app.use(express.json());
-app.use('/uploads', express.static('uploads'));
+
+// Only serve static files for local storage
+if (storageType === 'local') {
+  const uploadPath = process.env.LOCAL_STORAGE_PATH || './uploads';
+  app.use('/uploads', express.static(uploadPath));
+  console.log(`📁 Serving static files from: ${uploadPath}`);
+}
 
 app.get('/', (req, res) => {
-  res.json({ 
+  res.json({
     message: 'BuildPro API - Complete',
     version: '1.0.0',
     modules: ['auth', 'projects', 'documents', 'rfis', 'drawings', 'photos', 'submittals', 'dailylogs', 'punch', 'financials', 'team']
   });
+});
+
+// Storage health check endpoint
+app.get('/api/v1/storage/health', async (req, res) => {
+  try {
+    const isHealthy = await storage.healthCheck();
+    res.json({
+      status: isHealthy ? 'ok' : 'degraded',
+      storageType: storageType,
+      healthy: isHealthy,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(503).json({
+      status: 'error',
+      storageType: storageType,
+      healthy: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
 const authenticateToken = (req, res, next) => {
@@ -295,19 +304,24 @@ app.delete('/api/v1/documents/:id', authenticateToken, async (req, res, next) =>
 
     // File cleanup (non-blocking)
     if (mainFilePath) {
-      fs.unlink(mainFilePath, (err) => {
-        if (err) console.error('File deletion error:', err);
-      });
+      try {
+        await storage.deleteFile(mainFilePath);
+      } catch (error) {
+        console.error('File deletion error:', error);
+      }
     }
 
     // Delete version files
-    versionFilePaths.forEach(filePath => {
-      if (filePath) {
-        fs.unlink(filePath, (err) => {
-          if (err) console.error('Version file deletion error:', err);
-        });
+    if (versionFilePaths.length > 0) {
+      try {
+        const deleteResults = await storage.deleteFiles(versionFilePaths.filter(fp => fp));
+        if (deleteResults.failed.length > 0) {
+          console.error('Some version files failed to delete:', deleteResults.failed);
+        }
+      } catch (error) {
+        console.error('Version file deletion error:', error);
       }
-    });
+    }
 
     res.json({ success: true });
   } catch (error) {
@@ -320,17 +334,33 @@ app.post('/api/v1/projects/:projectId/documents', authenticateToken, upload.sing
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const { name } = req.body;
+
+    // Handle file storage based on storage type
+    let filePath, fileUrl;
+    if (storageType === 'local') {
+      filePath = req.file.path;
+      fileUrl = `/uploads/${path.basename(req.file.path)}`;
+    } else {
+      const uploadResult = await storage.uploadBuffer(
+        req.file.buffer,
+        req.file.originalname,
+        { mimetype: req.file.mimetype, projectId: req.params.projectId }
+      );
+      filePath = uploadResult.path;
+      fileUrl = uploadResult.url;
+    }
+
     const result = await pool.query(
       `INSERT INTO documents (project_id, name, file_path, file_size, mime_type, uploaded_by)
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [req.params.projectId, name || req.file.originalname, req.file.path, req.file.size, req.file.mimetype, req.user.userId]
+      [req.params.projectId, name || req.file.originalname, filePath, req.file.size, req.file.mimetype, req.user.userId]
     );
 
     // Create initial version entry (Version 1)
     await pool.query(
       `INSERT INTO document_versions (document_id, version_number, file_path, file_size, uploaded_by, version_name, is_current)
        VALUES ($1, 1, $2, $3, $4, 'Original', true)`,
-      [result.rows[0].id, req.file.path, req.file.size, req.user.userId]
+      [result.rows[0].id, filePath, req.file.size, req.user.userId]
     );
 
     await emitEvent('document.uploaded', 'document', result.rows[0].id, req.params.projectId, req.user.userId, result.rows[0]);
@@ -632,6 +662,21 @@ app.post('/api/v1/documents/:id/versions', authenticateToken, upload.single('fil
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const { version_name, change_description } = req.body;
 
+    // Handle file storage based on storage type
+    let filePath, fileUrl;
+    if (storageType === 'local') {
+      filePath = req.file.path;
+      fileUrl = `/uploads/${path.basename(req.file.path)}`;
+    } else {
+      const uploadResult = await storage.uploadBuffer(
+        req.file.buffer,
+        req.file.originalname,
+        { mimetype: req.file.mimetype, documentId: req.params.id }
+      );
+      filePath = uploadResult.path;
+      fileUrl = uploadResult.url;
+    }
+
     // Get current max version number
     const versionResult = await pool.query(
       'SELECT COALESCE(MAX(version_number), 0) as max_version FROM document_versions WHERE document_id = $1',
@@ -649,13 +694,13 @@ app.post('/api/v1/documents/:id/versions', authenticateToken, upload.single('fil
     const result = await pool.query(
       `INSERT INTO document_versions (document_id, version_number, file_path, file_size, uploaded_by, version_name, change_description, is_current)
        VALUES ($1, $2, $3, $4, $5, $6, $7, true) RETURNING *`,
-      [req.params.id, newVersionNumber, req.file.path, req.file.size, req.user.userId, version_name, change_description]
+      [req.params.id, newVersionNumber, filePath, req.file.size, req.user.userId, version_name, change_description]
     );
 
     // Update main document file_path to new version
     await pool.query(
       'UPDATE documents SET file_path = $1, file_size = $2 WHERE id = $3',
-      [req.file.path, req.file.size, req.params.id]
+      [filePath, req.file.size, req.params.id]
     );
 
     res.status(201).json({ version: result.rows[0] });
@@ -703,7 +748,15 @@ app.get('/api/v1/document-versions/:versionId', async (req, res, next) => {
         if (result.rows.length === 0) return res.status(404).json({ error: 'Version not found' });
 
         const filePath = result.rows[0].file_path;
-        res.download(filePath);
+
+        if (storageType === 'local') {
+          // Direct file download for local storage
+          res.download(path.resolve(filePath));
+        } else {
+          // Redirect to signed URL for cloud storage
+          const signedUrl = await storage.getSignedUrl(filePath, 3600);
+          res.redirect(signedUrl);
+        }
       } catch (error) {
         next(error);
       }
@@ -922,13 +975,28 @@ app.post('/api/v1/projects/:projectId/documents/bulk-upload', authenticateToken,
       const meta = metadata[i] || {};
 
       try {
+        // Handle file storage based on storage type
+        let filePath, fileUrl;
+        if (storageType === 'local') {
+          filePath = file.path;
+          fileUrl = `/uploads/${path.basename(file.path)}`;
+        } else {
+          const uploadResult = await storage.uploadBuffer(
+            file.buffer,
+            file.originalname,
+            { mimetype: file.mimetype, projectId: req.params.projectId }
+          );
+          filePath = uploadResult.path;
+          fileUrl = uploadResult.url;
+        }
+
         const result = await pool.query(
           `INSERT INTO documents (project_id, name, file_path, file_size, mime_type, uploaded_by, description, tags, category, folder_id)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
           [
             req.params.projectId,
             meta.name || file.originalname,
-            file.path,
+            filePath,
             file.size,
             file.mimetype,
             req.user.userId,
@@ -943,7 +1011,7 @@ app.post('/api/v1/projects/:projectId/documents/bulk-upload', authenticateToken,
         await pool.query(
           `INSERT INTO document_versions (document_id, version_number, file_path, file_size, uploaded_by, version_name, is_current)
            VALUES ($1, 1, $2, $3, $4, 'Original', true)`,
-          [result.rows[0].id, file.path, file.size, req.user.userId]
+          [result.rows[0].id, filePath, file.size, req.user.userId]
         );
 
         uploaded.push(result.rows[0]);
@@ -996,13 +1064,17 @@ app.post('/api/v1/documents/bulk-delete', authenticateToken, async (req, res, ne
     await pool.query('DELETE FROM documents WHERE id = ANY($1)', [document_ids]);
 
     // Cleanup files (non-blocking)
-    filesResult.rows.forEach(row => {
-      if (row.file_path) {
-        fs.unlink(row.file_path, err => {
-          if (err) console.error('File deletion error:', err);
-        });
+    const filePaths = filesResult.rows.map(row => row.file_path).filter(fp => fp);
+    if (filePaths.length > 0) {
+      try {
+        const deleteResults = await storage.deleteFiles(filePaths);
+        if (deleteResults.failed.length > 0) {
+          console.error('Some files failed to delete:', deleteResults.failed);
+        }
+      } catch (error) {
+        console.error('File deletion error:', error);
       }
-    });
+    }
 
     res.json({ success: true, count: document_ids.length });
   } catch (error) {
@@ -1073,9 +1145,17 @@ app.get('/api/v1/documents/:id/preview', async (req, res, next) => {
         if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
 
         const { file_path, mime_type, name } = result.rows[0];
-        res.setHeader('Content-Type', mime_type);
-        res.setHeader('Content-Disposition', `inline; filename="${name}"`);
-        res.sendFile(path.resolve(file_path));
+
+        if (storageType === 'local') {
+          // Direct file serving for local storage
+          res.setHeader('Content-Type', mime_type);
+          res.setHeader('Content-Disposition', `inline; filename="${name}"`);
+          res.sendFile(path.resolve(file_path));
+        } else {
+          // Redirect to signed URL for cloud storage
+          const signedUrl = await storage.getSignedUrl(file_path, 3600);
+          res.redirect(signedUrl);
+        }
       } catch (error) {
         next(error);
       }
@@ -1262,20 +1342,35 @@ app.post('/api/v1/drawing-sets/:setId/sheets', authenticateToken, upload.single(
   try {
     const { sheet_number, title, discipline, page_number } = req.body;
     let documentVersionId = null;
-    
+
     if (req.file) {
+      // Handle file storage based on storage type
+      let filePath, fileUrl;
+      if (storageType === 'local') {
+        filePath = req.file.path;
+        fileUrl = `/uploads/${path.basename(req.file.path)}`;
+      } else {
+        const uploadResult = await storage.uploadBuffer(
+          req.file.buffer,
+          req.file.originalname,
+          { mimetype: req.file.mimetype, drawingSetId: req.params.setId }
+        );
+        filePath = uploadResult.path;
+        fileUrl = uploadResult.url;
+      }
+
       const docResult = await pool.query(
         `INSERT INTO documents (project_id, name, file_path, file_size, mime_type, uploaded_by)
          SELECT ds.project_id, $1, $2, $3, $4, $5 FROM drawing_sets ds WHERE ds.id = $6 RETURNING *`,
-        [req.file.originalname, req.file.path, req.file.size, req.file.mimetype, req.user.userId, req.params.setId]
+        [req.file.originalname, filePath, req.file.size, req.file.mimetype, req.user.userId, req.params.setId]
       );
-      
+
       const versionResult = await pool.query(
         `INSERT INTO document_versions (document_id, version_number, file_path, file_size, uploaded_by)
          VALUES ($1, 1, $2, $3, $4) RETURNING *`,
-        [docResult.rows[0].id, req.file.path, req.file.size, req.user.userId]
+        [docResult.rows[0].id, filePath, req.file.size, req.user.userId]
       );
-      
+
       documentVersionId = versionResult.rows[0].id;
     }
     
@@ -1450,25 +1545,40 @@ app.post('/api/v1/photo-albums/:albumId/photos', authenticateToken, upload.singl
   try {
     if (!req.file) return res.status(400).json({ error: 'No photo uploaded' });
     const { title, description, taken_at, location } = req.body;
-    
+
     const albumResult = await pool.query('SELECT project_id FROM photo_albums WHERE id = $1', [req.params.albumId]);
     if (albumResult.rows.length === 0) return res.status(404).json({ error: 'Album not found' });
-    
+
     const projectId = albumResult.rows[0].project_id;
-    
+
+    // Handle file storage based on storage type
+    let filePath, fileUrl;
+    if (storageType === 'local') {
+      filePath = req.file.path;
+      fileUrl = `/uploads/${path.basename(req.file.path)}`;
+    } else {
+      const uploadResult = await storage.uploadBuffer(
+        req.file.buffer,
+        req.file.originalname,
+        { mimetype: req.file.mimetype, albumId: req.params.albumId, projectId: projectId }
+      );
+      filePath = uploadResult.path;
+      fileUrl = uploadResult.url;
+    }
+
     const docResult = await pool.query(
       `INSERT INTO documents (project_id, name, file_path, file_size, mime_type, uploaded_by)
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [projectId, req.file.originalname, req.file.path, req.file.size, req.file.mimetype, req.user.userId]
+      [projectId, req.file.originalname, filePath, req.file.size, req.file.mimetype, req.user.userId]
     );
-    
+
     const photoResult = await pool.query(
       `INSERT INTO photos (album_id, project_id, document_id, title, description, taken_at, location, uploaded_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [req.params.albumId, projectId, docResult.rows[0].id, title, description, 
+      [req.params.albumId, projectId, docResult.rows[0].id, title, description,
        taken_at || new Date().toISOString(), location, req.user.userId]
     );
-    
+
     res.status(201).json({ photo: photoResult.rows[0] });
   } catch (error) {
     next(error);
@@ -1609,11 +1719,11 @@ app.delete('/api/v1/photos/:id', authenticateToken, async (req, res, next) => {
 
     // File cleanup (non-blocking, after DB commit)
     if (filePath) {
-      fs.unlink(filePath, (unlinkErr) => {
-        if (unlinkErr) {
-          console.error('File deletion error (non-critical):', unlinkErr);
-        }
-      });
+      try {
+        await storage.deleteFile(filePath);
+      } catch (unlinkErr) {
+        console.error('File deletion error (non-critical):', unlinkErr);
+      }
     }
 
     // Emit audit event
