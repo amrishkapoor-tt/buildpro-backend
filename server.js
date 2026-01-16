@@ -954,6 +954,19 @@ app.get('/api/v1/submittals/:id', authenticateToken, async (req, res, next) => {
 app.post('/api/v1/projects/:projectId/daily-logs', authenticateToken, async (req, res, next) => {
   try {
     const { log_date, weather, work_performed, delays } = req.body;
+
+    // Check if a log already exists for this date
+    const existingLog = await pool.query(
+      'SELECT id FROM daily_logs WHERE project_id = $1 AND log_date = $2',
+      [req.params.projectId, log_date]
+    );
+
+    if (existingLog.rows.length > 0) {
+      return res.status(400).json({
+        error: 'A daily log already exists for this date. Please select a different date or edit the existing log.'
+      });
+    }
+
     const result = await pool.query(
       `INSERT INTO daily_logs (project_id, log_date, weather, work_performed, delays, is_submitted, created_by)
        VALUES ($1, $2, $3, $4, $5, false, $6) RETURNING *`,
