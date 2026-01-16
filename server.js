@@ -3386,71 +3386,79 @@ app.get('/api/v1/projects/:projectId/analytics', authenticateToken, requireProje
       budgetLines, commitments, changeOrders, tasks, milestones, members
     ] = await Promise.all([
       pool.query('SELECT COUNT(*) as count FROM documents WHERE project_id = $1', [projectId]),
-      pool.query('SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = $2) as open FROM rfis WHERE project_id = $1', [projectId, 'open']),
+      pool.query(`SELECT COUNT(*) as total,
+                  COALESCE(SUM(CASE WHEN status = $2 THEN 1 ELSE 0 END), 0) as open
+                  FROM rfis WHERE project_id = $1`, [projectId, 'open']),
       pool.query('SELECT COUNT(*) as count FROM drawing_sheets WHERE drawing_set_id IN (SELECT id FROM drawing_sets WHERE project_id = $1)', [projectId]),
       pool.query('SELECT COUNT(*) as count FROM photos WHERE album_id IN (SELECT id FROM photo_albums WHERE project_id = $1)', [projectId]),
-      pool.query('SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = $2) as pending FROM submittals WHERE package_id IN (SELECT id FROM submittal_packages WHERE project_id = $1)', [projectId, 'pending_review']),
+      pool.query(`SELECT COUNT(*) as total,
+                  COALESCE(SUM(CASE WHEN status = $2 THEN 1 ELSE 0 END), 0) as pending
+                  FROM submittals WHERE package_id IN (SELECT id FROM submittal_packages WHERE project_id = $1)`, [projectId, 'pending_review']),
       pool.query('SELECT COUNT(*) as count FROM daily_logs WHERE project_id = $1', [projectId]),
-      pool.query('SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = $2) as open FROM punch_items WHERE project_id = $1', [projectId, 'open']),
+      pool.query(`SELECT COUNT(*) as total,
+                  COALESCE(SUM(CASE WHEN status = $2 THEN 1 ELSE 0 END), 0) as open
+                  FROM punch_items WHERE project_id = $1`, [projectId, 'open']),
       pool.query('SELECT COUNT(*) as count, COALESCE(SUM(budget_amount), 0) as total_budget FROM budget_lines WHERE project_id = $1', [projectId]),
       pool.query('SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total_committed FROM commitments WHERE project_id = $1', [projectId]),
       pool.query('SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total_changes FROM change_orders WHERE project_id = $1 AND status = $2', [projectId, 'approved']),
       pool.query(`SELECT COUNT(*) as total,
-                  COUNT(*) FILTER (WHERE status = 'completed') as completed,
-                  COUNT(*) FILTER (WHERE status = 'in_progress') as in_progress
+                  COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) as completed,
+                  COALESCE(SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END), 0) as in_progress
                   FROM schedule_tasks WHERE project_id = $1`, [projectId]),
-      pool.query('SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = $2) as achieved FROM schedule_milestones WHERE project_id = $1', [projectId, 'achieved']),
+      pool.query(`SELECT COUNT(*) as total,
+                  COALESCE(SUM(CASE WHEN status = $2 THEN 1 ELSE 0 END), 0) as achieved
+                  FROM schedule_milestones WHERE project_id = $1`, [projectId, 'achieved']),
       pool.query('SELECT COUNT(*) as count FROM project_members WHERE project_id = $1', [projectId])
     ]);
 
     const analytics = {
       documents: {
-        total: parseInt(documents.rows[0].count)
+        total: parseInt(documents.rows[0].count) || 0
       },
       rfis: {
-        total: parseInt(rfis.rows[0].total),
-        open: parseInt(rfis.rows[0].open),
-        closed: parseInt(rfis.rows[0].total) - parseInt(rfis.rows[0].open)
+        total: parseInt(rfis.rows[0].total) || 0,
+        open: parseInt(rfis.rows[0].open) || 0,
+        closed: (parseInt(rfis.rows[0].total) || 0) - (parseInt(rfis.rows[0].open) || 0)
       },
       drawings: {
-        total: parseInt(drawings.rows[0].count)
+        total: parseInt(drawings.rows[0].count) || 0
       },
       photos: {
-        total: parseInt(photos.rows[0].count)
+        total: parseInt(photos.rows[0].count) || 0
       },
       submittals: {
-        total: parseInt(submittals.rows[0].total),
-        pending: parseInt(submittals.rows[0].pending)
+        total: parseInt(submittals.rows[0].total) || 0,
+        pending: parseInt(submittals.rows[0].pending) || 0
       },
       dailyLogs: {
-        total: parseInt(dailyLogs.rows[0].count)
+        total: parseInt(dailyLogs.rows[0].count) || 0
       },
       punchList: {
-        total: parseInt(punchItems.rows[0].total),
-        open: parseInt(punchItems.rows[0].open),
-        closed: parseInt(punchItems.rows[0].total) - parseInt(punchItems.rows[0].open)
+        total: parseInt(punchItems.rows[0].total) || 0,
+        open: parseInt(punchItems.rows[0].open) || 0,
+        closed: (parseInt(punchItems.rows[0].total) || 0) - (parseInt(punchItems.rows[0].open) || 0)
       },
       financials: {
-        budgetLines: parseInt(budgetLines.rows[0].count),
-        totalBudget: parseFloat(budgetLines.rows[0].total_budget),
-        commitments: parseInt(commitments.rows[0].count),
-        totalCommitted: parseFloat(commitments.rows[0].total_committed),
-        changeOrders: parseInt(changeOrders.rows[0].count),
-        totalChanges: parseFloat(changeOrders.rows[0].total_changes),
-        remainingBudget: parseFloat(budgetLines.rows[0].total_budget) - parseFloat(commitments.rows[0].total_committed)
+        budgetLines: parseInt(budgetLines.rows[0].count) || 0,
+        totalBudget: parseFloat(budgetLines.rows[0].total_budget) || 0,
+        commitments: parseInt(commitments.rows[0].count) || 0,
+        totalCommitted: parseFloat(commitments.rows[0].total_committed) || 0,
+        changeOrders: parseInt(changeOrders.rows[0].count) || 0,
+        totalChanges: parseFloat(changeOrders.rows[0].total_changes) || 0,
+        remainingBudget: (parseFloat(budgetLines.rows[0].total_budget) || 0) - (parseFloat(commitments.rows[0].total_committed) || 0)
       },
       schedule: {
-        totalTasks: parseInt(tasks.rows[0].total),
-        completedTasks: parseInt(tasks.rows[0].completed),
-        inProgressTasks: parseInt(tasks.rows[0].in_progress),
-        completionPercentage: parseInt(tasks.rows[0].total) > 0
-          ? Math.round((parseInt(tasks.rows[0].completed) / parseInt(tasks.rows[0].total)) * 100)
+        totalTasks: parseInt(tasks.rows[0].total) || 0,
+        completedTasks: parseInt(tasks.rows[0].completed) || 0,
+        inProgressTasks: parseInt(tasks.rows[0].in_progress) || 0,
+        completionPercentage: (parseInt(tasks.rows[0].total) || 0) > 0
+          ? Math.round(((parseInt(tasks.rows[0].completed) || 0) / parseInt(tasks.rows[0].total)) * 100)
           : 0,
-        milestones: parseInt(milestones.rows[0].total),
-        achievedMilestones: parseInt(milestones.rows[0].achieved)
+        milestones: parseInt(milestones.rows[0].total) || 0,
+        achievedMilestones: parseInt(milestones.rows[0].achieved) || 0
       },
       team: {
-        members: parseInt(members.rows[0].count)
+        members: parseInt(members.rows[0].count) || 0
       }
     };
 
