@@ -256,9 +256,33 @@ app.post('/api/v1/projects', authenticateToken, async (req, res, next) => {
 // DOCUMENTS
 app.delete('/api/v1/documents/:id', authenticateToken, async (req, res, next) => {
   try {
+    // Get document version IDs for this document
+    const versions = await pool.query(
+      'SELECT id FROM document_versions WHERE document_id = $1', 
+      [req.params.id]
+    );
+    const versionIds = versions.rows.map(v => v.id);
+    
+    if (versionIds.length > 0) {
+      // Remove references from drawing_sheets
+      await pool.query(
+        'UPDATE drawing_sheets SET document_version_id = NULL WHERE document_version_id = ANY($1)',
+        [versionIds]
+      );
+      
+      // Delete document versions
+      await pool.query(
+        'DELETE FROM document_versions WHERE document_id = $1', 
+        [req.params.id]
+      );
+    }
+    
+    // Delete the document
     await pool.query('DELETE FROM documents WHERE id = $1', [req.params.id]);
+    
     res.json({ success: true });
   } catch (error) {
+    console.error('Delete document error:', error);
     next(error);
   }
 });
