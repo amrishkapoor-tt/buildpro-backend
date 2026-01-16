@@ -672,16 +672,34 @@ app.get('/api/v1/documents/:id/versions', authenticateToken, async (req, res, ne
 });
 
 // Download specific version
-app.get('/api/v1/document-versions/:versionId', authenticateToken, async (req, res, next) => {
+app.get('/api/v1/document-versions/:versionId', async (req, res, next) => {
   try {
-    const result = await pool.query(
-      'SELECT file_path FROM document_versions WHERE id = $1',
-      [req.params.versionId]
-    );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Version not found' });
+    // Support token in query parameter for direct download links
+    const token = req.query.token || (req.headers['authorization'] && req.headers['authorization'].split(' ')[1]);
 
-    const filePath = result.rows[0].file_path;
-    res.download(filePath);
+    if (!token) {
+      return res.status(401).json({ error: 'Access token required' });
+    }
+
+    // Verify token
+    jwt.verify(token, JWT_SECRET, async (err, user) => {
+      if (err) {
+        return res.status(403).json({ error: 'Invalid token' });
+      }
+
+      try {
+        const result = await pool.query(
+          'SELECT file_path FROM document_versions WHERE id = $1',
+          [req.params.versionId]
+        );
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Version not found' });
+
+        const filePath = result.rows[0].file_path;
+        res.download(filePath);
+      } catch (error) {
+        next(error);
+      }
+    });
   } catch (error) {
     next(error);
   }
