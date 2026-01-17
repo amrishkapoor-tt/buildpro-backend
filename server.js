@@ -130,11 +130,19 @@ const requireProjectMember = async (req, res, next) => {
   }
 };
 
-const checkPermission = (requiredRole) => {
+// Enhanced permission checking middleware
+const checkPermission = (requiredRole, options = {}) => {
   return async (req, res, next) => {
     try {
       const projectId = req.params.projectId || req.body.project_id;
-      if (!projectId) return next();
+
+      if (!projectId && !options.requireProject) {
+        return next();
+      }
+
+      if (!projectId) {
+        return res.status(400).json({ error: 'Project ID required' });
+      }
 
       const result = await pool.query(
         `SELECT role FROM project_members WHERE project_id = $1 AND user_id = $2`,
@@ -142,18 +150,89 @@ const checkPermission = (requiredRole) => {
       );
 
       if (result.rows.length === 0) {
-        return res.status(403).json({ error: 'Access denied' });
+        return res.status(403).json({
+          error: 'Access denied. You must be a project member.',
+          required_permission: requiredRole
+        });
       }
 
-      const roleHierarchy = { 'viewer': 1, 'subcontractor': 2, 'engineer': 3, 'superintendent': 4, 'project_manager': 5, 'admin': 6 };
-      if (roleHierarchy[result.rows[0].role] < roleHierarchy[requiredRole]) {
-        return res.status(403).json({ error: `Requires ${requiredRole} role` });
+      const userRole = result.rows[0].role;
+      const roleHierarchy = {
+        'viewer': 1, 'subcontractor': 2, 'engineer': 3,
+        'superintendent': 4, 'project_manager': 5, 'admin': 6
+      };
+
+      if (roleHierarchy[userRole] < roleHierarchy[requiredRole]) {
+        return res.status(403).json({
+          error: `Insufficient permissions. Requires ${requiredRole} role or higher.`,
+          user_role: userRole, required_role: requiredRole
+        });
       }
+
+      req.userRole = userRole;
+      req.userRoleLevel = roleHierarchy[userRole];
       next();
     } catch (error) {
       next(error);
     }
   };
+};
+
+// Ownership check middleware
+const checkOwnership = (resourceType) => {
+  return async (req, res, next) => {
+    try {
+      const resourceId = req.params.id;
+      let query;
+
+      switch(resourceType) {
+        case 'document':
+          query = 'SELECT uploaded_by FROM documents WHERE id = $1';
+          break;
+        case 'daily_log':
+          query = 'SELECT created_by FROM daily_logs WHERE id = $1';
+          break;
+        case 'photo':
+          query = 'SELECT uploaded_by FROM photos WHERE id = $1';
+          break;
+        default:
+          return res.status(400).json({ error: 'Invalid resource type' });
+      }
+
+      const result = await pool.query(query, [resourceId]);
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: `${resourceType} not found` });
+      }
+
+      const roleHierarchy = { 'viewer': 1, 'subcontractor': 2, 'engineer': 3, 'superintendent': 4, 'project_manager': 5, 'admin': 6 };
+      const isOwner = result.rows[0].uploaded_by === req.user.userId || result.rows[0].created_by === req.user.userId;
+      const hasSufficientRole = req.userRoleLevel >= roleHierarchy['superintendent'];
+
+      if (!isOwner && !hasSufficientRole) {
+        return res.status(403).json({ error: 'You can only modify your own resources' });
+      }
+
+      next();
+    } catch (error) {
+      next(error);
+    }
+  };
+};
+
+// Audit logging function
+const logAudit = async (userId, action, entityType, entityId, changes = null, req = null) => {
+  try {
+    await pool.query(
+      `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, changes, ip_address, user_agent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [userId, action, entityType, entityId,
+       changes ? JSON.stringify(changes) : null,
+       req?.ip || null, req?.get('user-agent') || null]
+    );
+  } catch (error) {
+    console.error('Audit logging error:', error);
+  }
 };
 
 const emitEvent = async (eventType, entityType, entityId, projectId, userId, eventData) => {
@@ -287,7 +366,7 @@ app.post('/api/v1/projects', authenticateToken, async (req, res, next) => {
 });
 
 // DOCUMENTS
-app.delete('/api/v1/documents/:id', authenticateToken, async (req, res, next) => {
+app.delete('/api/v1/documents/:id', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
   try {
     // Get document and its file path
     const docResult = await pool.query(
@@ -354,7 +433,7 @@ app.delete('/api/v1/documents/:id', authenticateToken, async (req, res, next) =>
   }
 });
 
-app.post('/api/v1/projects/:projectId/documents', authenticateToken, upload.single('file'), async (req, res, next) => {
+app.post('/api/v1/projects/:projectId/documents', authenticateToken, checkPermission('subcontractor'), upload.single('file'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const { name } = req.body;
@@ -419,7 +498,7 @@ app.get('/api/v1/projects/:projectId/documents', authenticateToken, async (req, 
 });
 
 // Update document metadata
-app.put('/api/v1/documents/:id', authenticateToken, async (req, res, next) => {
+app.put('/api/v1/documents/:id', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
   try {
     const { name, description, tags, category } = req.body;
     const result = await pool.query(
@@ -555,7 +634,7 @@ app.get('/api/v1/projects/:projectId/documents/search', authenticateToken, async
 });
 
 // Move document to folder
-app.post('/api/v1/documents/:id/move', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/documents/:id/move', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
   try {
     const { folder_id } = req.body;
     const result = await pool.query(
@@ -571,7 +650,7 @@ app.post('/api/v1/documents/:id/move', authenticateToken, async (req, res, next)
 
 // FOLDER MANAGEMENT
 // Create folder
-app.post('/api/v1/projects/:projectId/folders', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/projects/:projectId/folders', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
   try {
     const { name, parent_folder_id } = req.body;
     if (!name) return res.status(400).json({ error: 'Folder name required' });
@@ -631,7 +710,7 @@ app.get('/api/v1/projects/:projectId/folders', authenticateToken, async (req, re
 });
 
 // Rename folder
-app.put('/api/v1/folders/:id', authenticateToken, async (req, res, next) => {
+app.put('/api/v1/folders/:id', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
   try {
     const { name } = req.body;
     if (!name) return res.status(400).json({ error: 'Folder name required' });
@@ -648,7 +727,7 @@ app.put('/api/v1/folders/:id', authenticateToken, async (req, res, next) => {
 });
 
 // Delete folder (move contents to parent)
-app.delete('/api/v1/folders/:id', authenticateToken, async (req, res, next) => {
+app.delete('/api/v1/folders/:id', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
   try {
     const folderResult = await pool.query(
       'SELECT parent_folder_id FROM document_folders WHERE id = $1',
@@ -681,7 +760,7 @@ app.delete('/api/v1/folders/:id', authenticateToken, async (req, res, next) => {
 
 // DOCUMENT VERSIONING
 // Upload new version
-app.post('/api/v1/documents/:id/versions', authenticateToken, upload.single('file'), async (req, res, next) => {
+app.post('/api/v1/documents/:id/versions', authenticateToken, checkPermission('subcontractor'), upload.single('file'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const { version_name, change_description } = req.body;
@@ -791,7 +870,7 @@ app.get('/api/v1/document-versions/:versionId', async (req, res, next) => {
 });
 
 // Revert to specific version
-app.put('/api/v1/documents/:id/versions/:versionId/set-current', authenticateToken, async (req, res, next) => {
+app.put('/api/v1/documents/:id/versions/:versionId/set-current', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
   try {
     // Mark all versions as not current
     await pool.query(
@@ -841,7 +920,7 @@ app.delete('/api/v1/document-versions/:versionId', authenticateToken, async (req
 
 // TAG MANAGEMENT
 // Add tags to document
-app.post('/api/v1/documents/:id/tags', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/documents/:id/tags', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
   try {
     const { tags } = req.body;
     if (!Array.isArray(tags)) return res.status(400).json({ error: 'Tags must be an array' });
@@ -858,7 +937,7 @@ app.post('/api/v1/documents/:id/tags', authenticateToken, async (req, res, next)
 });
 
 // Remove tag from document
-app.delete('/api/v1/documents/:id/tags', authenticateToken, async (req, res, next) => {
+app.delete('/api/v1/documents/:id/tags', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
   try {
     const { tag } = req.body;
     if (!tag) return res.status(400).json({ error: 'Tag required' });
@@ -890,7 +969,7 @@ app.get('/api/v1/projects/:projectId/tags', authenticateToken, async (req, res, 
 });
 
 // Update document category
-app.put('/api/v1/documents/:id/category', authenticateToken, async (req, res, next) => {
+app.put('/api/v1/documents/:id/category', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
   try {
     const { category } = req.body;
     const result = await pool.query(
@@ -906,7 +985,7 @@ app.put('/api/v1/documents/:id/category', authenticateToken, async (req, res, ne
 
 // DOCUMENT LINKING
 // Link document to entity
-app.post('/api/v1/documents/:id/link', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/documents/:id/link', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
   try {
     const { target_type, target_id, relationship } = req.body;
     if (!target_type || !target_id) {
@@ -984,7 +1063,7 @@ app.get('/api/v1/submittals/:id/documents', authenticateToken, async (req, res, 
 
 // BULK OPERATIONS
 // Bulk upload
-app.post('/api/v1/projects/:projectId/documents/bulk-upload', authenticateToken, upload.array('files', 10), async (req, res, next) => {
+app.post('/api/v1/projects/:projectId/documents/bulk-upload', authenticateToken, checkPermission('subcontractor'), upload.array('files', 10), async (req, res, next) => {
   try {
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: 'No files uploaded' });
@@ -1052,7 +1131,7 @@ app.post('/api/v1/projects/:projectId/documents/bulk-upload', authenticateToken,
 });
 
 // Bulk move
-app.post('/api/v1/documents/bulk-move', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/documents/bulk-move', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
   try {
     const { document_ids, folder_id } = req.body;
     if (!Array.isArray(document_ids)) {
@@ -1071,7 +1150,7 @@ app.post('/api/v1/documents/bulk-move', authenticateToken, async (req, res, next
 });
 
 // Bulk delete
-app.post('/api/v1/documents/bulk-delete', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/documents/bulk-delete', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
   try {
     const { document_ids } = req.body;
     if (!Array.isArray(document_ids)) {
@@ -1107,7 +1186,7 @@ app.post('/api/v1/documents/bulk-delete', authenticateToken, async (req, res, ne
 });
 
 // Bulk tag
-app.post('/api/v1/documents/bulk-tag', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/documents/bulk-tag', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
   try {
     const { document_ids, tags } = req.body;
     if (!Array.isArray(document_ids) || !Array.isArray(tags)) {
@@ -1126,7 +1205,7 @@ app.post('/api/v1/documents/bulk-tag', authenticateToken, async (req, res, next)
 });
 
 // Bulk categorize
-app.post('/api/v1/documents/bulk-categorize', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/documents/bulk-categorize', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
   try {
     const { document_ids, category } = req.body;
     if (!Array.isArray(document_ids)) {
@@ -1262,7 +1341,7 @@ app.get('/api/v1/rfis/:id', authenticateToken, async (req, res, next) => {
   }
 });
 
-app.put('/api/v1/rfis/:id/status', authenticateToken, async (req, res, next) => {
+app.put('/api/v1/rfis/:id/status', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
   try {
     const { status } = req.body;
     const validTransitions = { 'draft': ['open'], 'open': ['answered', 'closed'], 'answered': ['closed'], 'closed': [] };
@@ -1287,7 +1366,7 @@ app.put('/api/v1/rfis/:id/status', authenticateToken, async (req, res, next) => 
   }
 });
 
-app.post('/api/v1/rfis/:id/responses', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/rfis/:id/responses', authenticateToken, checkPermission('subcontractor'), async (req, res, next) => {
   try {
     const { response_text, is_official } = req.body;
     const rfiResult = await pool.query('SELECT project_id FROM rfis WHERE id = $1', [req.params.id]);
@@ -1310,7 +1389,7 @@ app.post('/api/v1/rfis/:id/responses', authenticateToken, async (req, res, next)
 });
 
 // DRAWINGS
-app.post('/api/v1/projects/:projectId/drawing-sets', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/projects/:projectId/drawing-sets', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
   try {
     const { name, discipline, set_number, issue_date, revision } = req.body;
     const result = await pool.query(
@@ -1362,7 +1441,7 @@ app.get('/api/v1/drawing-sets/:id', authenticateToken, async (req, res, next) =>
   }
 });
 
-app.post('/api/v1/drawing-sets/:setId/sheets', authenticateToken, upload.single('file'), async (req, res, next) => {
+app.post('/api/v1/drawing-sets/:setId/sheets', authenticateToken, checkPermission('engineer'), upload.single('file'), async (req, res, next) => {
   try {
     const { sheet_number, title, discipline, page_number } = req.body;
     let documentVersionId = null;
@@ -1424,7 +1503,7 @@ app.get('/api/v1/drawing-sheets/:sheetId/markups', authenticateToken, async (req
   }
 });
 
-app.delete('/api/v1/drawing-sheets/:id', authenticateToken, async (req, res, next) => {
+app.delete('/api/v1/drawing-sheets/:id', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
   try {
     await pool.query('DELETE FROM drawing_sheets WHERE id = $1', [req.params.id]);
     res.json({ success: true });
@@ -1459,7 +1538,7 @@ app.get('/api/v1/drawing-sheets/:id', authenticateToken, async (req, res, next) 
     next(error);
   }
 });
-app.post('/api/v1/drawing-sheets/:sheetId/markups', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/drawing-sheets/:sheetId/markups', authenticateToken, checkPermission('subcontractor'), async (req, res, next) => {
   try {
     const { markup_data } = req.body;
     if (!markup_data || !markup_data.type) {
@@ -1488,7 +1567,7 @@ app.delete('/api/v1/drawing-markups/:id', authenticateToken, async (req, res, ne
 });
 
 // PHOTOS
-app.post('/api/v1/projects/:projectId/photo-albums', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/projects/:projectId/photo-albums', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
   try {
     const { name, description } = req.body;
     const result = await pool.query(
@@ -1515,7 +1594,7 @@ app.get('/api/v1/projects/:projectId/photo-albums', authenticateToken, async (re
   }
 });
 
-app.delete('/api/v1/photo-albums/:id', authenticateToken, async (req, res, next) => {
+app.delete('/api/v1/photo-albums/:id', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
   try {
     // Fetch album to verify it exists and get project_id
     const albumQuery = await pool.query(
@@ -1565,7 +1644,7 @@ app.delete('/api/v1/photo-albums/:id', authenticateToken, async (req, res, next)
   }
 });
 
-app.post('/api/v1/photo-albums/:albumId/photos', authenticateToken, upload.single('photo'), async (req, res, next) => {
+app.post('/api/v1/photo-albums/:albumId/photos', authenticateToken, checkPermission('subcontractor'), upload.single('photo'), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No photo uploaded' });
     const { title, description, taken_at, location } = req.body;
@@ -1694,7 +1773,7 @@ app.post('/api/v1/photos/:photoId/link', authenticateToken, async (req, res, nex
   }
 });
 
-app.delete('/api/v1/photos/:id', authenticateToken, async (req, res, next) => {
+app.delete('/api/v1/photos/:id', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
   const client = await pool.connect();
 
   try {
@@ -1779,7 +1858,7 @@ app.delete('/api/v1/photos/:id', authenticateToken, async (req, res, next) => {
 });
 
 // SUBMITTALS
-app.post('/api/v1/projects/:projectId/submittal-packages', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/projects/:projectId/submittal-packages', authenticateToken, checkPermission('subcontractor'), async (req, res, next) => {
   try {
     const { package_number, title, spec_section } = req.body;
     const result = await pool.query(
@@ -1809,7 +1888,7 @@ app.get('/api/v1/projects/:projectId/submittal-packages', authenticateToken, asy
   }
 });
 
-app.post('/api/v1/submittal-packages/:packageId/submittals', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/submittal-packages/:packageId/submittals', authenticateToken, checkPermission('subcontractor'), async (req, res, next) => {
   try {
     const { submittal_number, title, type, due_date } = req.body;
     const result = await pool.query(
@@ -1853,7 +1932,7 @@ app.get('/api/v1/submittals/:id', authenticateToken, async (req, res, next) => {
 });
 
 // DAILY LOGS
-app.post('/api/v1/projects/:projectId/daily-logs', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/projects/:projectId/daily-logs', authenticateToken, checkPermission('subcontractor'), async (req, res, next) => {
   try {
     const { log_date, weather, work_performed, delays } = req.body;
 
@@ -1903,7 +1982,7 @@ app.get('/api/v1/daily-logs/:id', authenticateToken, async (req, res, next) => {
   }
 });
 
-app.post('/api/v1/daily-logs/:id/submit', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/daily-logs/:id/submit', authenticateToken, checkPermission('subcontractor'), async (req, res, next) => {
   try {
     const result = await pool.query(
       `UPDATE daily_logs SET is_submitted = true, submitted_by = $1, submitted_at = CURRENT_TIMESTAMP
@@ -1917,7 +1996,7 @@ app.post('/api/v1/daily-logs/:id/submit', authenticateToken, async (req, res, ne
 });
 
 // PUNCH ITEMS
-app.post('/api/v1/projects/:projectId/punch-items', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/projects/:projectId/punch-items', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
   try {
     const { description, location, trade, priority, due_date } = req.body;
     const numberResult = await pool.query('SELECT COUNT(*) as count FROM punch_items WHERE project_id = $1', [req.params.projectId]);
@@ -1947,7 +2026,7 @@ app.get('/api/v1/projects/:projectId/punch-items', authenticateToken, async (req
   }
 });
 
-app.put('/api/v1/punch-items/:id', authenticateToken, async (req, res, next) => {
+app.put('/api/v1/punch-items/:id', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
   try {
     const { status } = req.body;
     const result = await pool.query(
@@ -1960,7 +2039,7 @@ app.put('/api/v1/punch-items/:id', authenticateToken, async (req, res, next) => 
   }
 });
 
-app.put('/api/v1/punch-items/:id/verify', authenticateToken, async (req, res, next) => {
+app.put('/api/v1/punch-items/:id/verify', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
   try {
     const result = await pool.query(
       `UPDATE punch_items SET status = 'verified', verified_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *`,
@@ -1972,7 +2051,7 @@ app.put('/api/v1/punch-items/:id/verify', authenticateToken, async (req, res, ne
   }
 });
 
-app.put('/api/v1/punch-items/:id/close', authenticateToken, async (req, res, next) => {
+app.put('/api/v1/punch-items/:id/close', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
   try {
     const result = await pool.query(
       `UPDATE punch_items SET status = 'closed' WHERE id = $1 RETURNING *`,
@@ -1985,7 +2064,7 @@ app.put('/api/v1/punch-items/:id/close', authenticateToken, async (req, res, nex
 });
 
 // FINANCIALS
-app.post('/api/v1/projects/:projectId/budget-lines', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/projects/:projectId/budget-lines', authenticateToken, checkPermission('project_manager'), async (req, res, next) => {
   try {
     const { cost_code, description, category, budgeted_amount } = req.body;
     const result = await pool.query(
@@ -1999,7 +2078,7 @@ app.post('/api/v1/projects/:projectId/budget-lines', authenticateToken, async (r
   }
 });
 
-app.get('/api/v1/projects/:projectId/budget-lines', authenticateToken, async (req, res, next) => {
+app.get('/api/v1/projects/:projectId/budget-lines', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
   try {
     const result = await pool.query(
       `SELECT bl.* FROM budget_lines bl WHERE bl.project_id = $1 ORDER BY bl.cost_code`,
@@ -2011,7 +2090,7 @@ app.get('/api/v1/projects/:projectId/budget-lines', authenticateToken, async (re
   }
 });
 
-app.post('/api/v1/projects/:projectId/commitments', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/projects/:projectId/commitments', authenticateToken, checkPermission('project_manager'), async (req, res, next) => {
   try {
     const { commitment_number, title, type, total_amount } = req.body;
     const result = await pool.query(
@@ -2025,7 +2104,7 @@ app.post('/api/v1/projects/:projectId/commitments', authenticateToken, async (re
   }
 });
 
-app.get('/api/v1/projects/:projectId/commitments', authenticateToken, async (req, res, next) => {
+app.get('/api/v1/projects/:projectId/commitments', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
   try {
     const result = await pool.query(
       `SELECT c.* FROM commitments c WHERE c.project_id = $1 ORDER BY c.created_at DESC`,
@@ -2037,7 +2116,7 @@ app.get('/api/v1/projects/:projectId/commitments', authenticateToken, async (req
   }
 });
 
-app.post('/api/v1/projects/:projectId/change-events', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/projects/:projectId/change-events', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
   try {
     const { event_number, title, description, estimated_cost, estimated_days } = req.body;
     const result = await pool.query(
@@ -2051,7 +2130,7 @@ app.post('/api/v1/projects/:projectId/change-events', authenticateToken, async (
   }
 });
 
-app.get('/api/v1/projects/:projectId/change-events', authenticateToken, async (req, res, next) => {
+app.get('/api/v1/projects/:projectId/change-events', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
   try {
     const result = await pool.query(
       `SELECT ce.* FROM change_events ce WHERE ce.project_id = $1 ORDER BY ce.created_at DESC`,
@@ -2063,7 +2142,7 @@ app.get('/api/v1/projects/:projectId/change-events', authenticateToken, async (r
   }
 });
 
-app.put('/api/v1/change-events/:id/approve', authenticateToken, async (req, res, next) => {
+app.put('/api/v1/change-events/:id/approve', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
   try {
     await pool.query(`UPDATE change_events SET status = 'approved' WHERE id = $1`, [req.params.id]);
     res.json({ success: true });
@@ -2072,7 +2151,7 @@ app.put('/api/v1/change-events/:id/approve', authenticateToken, async (req, res,
   }
 });
 
-app.post('/api/v1/change-events/:id/convert-to-order', authenticateToken, async (req, res, next) => {
+app.post('/api/v1/change-events/:id/convert-to-order', authenticateToken, checkPermission('project_manager'), async (req, res, next) => {
   try {
     const eventResult = await pool.query(`SELECT * FROM change_events WHERE id = $1`, [req.params.id]);
     if (eventResult.rows.length === 0) return res.status(404).json({ error: 'Not found' });
@@ -2094,7 +2173,7 @@ app.post('/api/v1/change-events/:id/convert-to-order', authenticateToken, async 
   }
 });
 
-app.get('/api/v1/projects/:projectId/change-orders', authenticateToken, async (req, res, next) => {
+app.get('/api/v1/projects/:projectId/change-orders', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
   try {
     const result = await pool.query(
       `SELECT co.* FROM change_orders co WHERE co.project_id = $1 ORDER BY co.created_at DESC`,
@@ -2106,7 +2185,7 @@ app.get('/api/v1/projects/:projectId/change-orders', authenticateToken, async (r
   }
 });
 
-app.put('/api/v1/change-orders/:id/approve', authenticateToken, async (req, res, next) => {
+app.put('/api/v1/change-orders/:id/approve', authenticateToken, checkPermission('project_manager'), async (req, res, next) => {
   try {
     const statusCheck = await pool.query('SELECT project_id, cost_impact FROM change_orders WHERE id = $1', [req.params.id]);
     if (statusCheck.rows.length === 0) return res.status(404).json({ error: 'Not found' });
@@ -2161,6 +2240,185 @@ app.get('/api/v1/projects/:projectId/members', authenticateToken, async (req, re
       [req.params.projectId]
     );
     res.json({ members: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Add member to project
+app.post('/api/v1/projects/:projectId/members',
+  authenticateToken,
+  checkPermission('project_manager'),
+  async (req, res, next) => {
+    try {
+      const { user_id, role, email } = req.body;
+
+      const validRoles = ['viewer', 'subcontractor', 'engineer', 'superintendent', 'project_manager', 'admin'];
+      if (!validRoles.includes(role)) {
+        return res.status(400).json({ error: 'Invalid role' });
+      }
+
+      let userId = user_id;
+      if (!userId && email) {
+        const userResult = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+        if (userResult.rows.length === 0) {
+          return res.status(404).json({ error: 'User not found with that email' });
+        }
+        userId = userResult.rows[0].id;
+      }
+
+      if (!userId) {
+        return res.status(400).json({ error: 'user_id or email required' });
+      }
+
+      const existing = await pool.query(
+        'SELECT id FROM project_members WHERE project_id = $1 AND user_id = $2',
+        [req.params.projectId, userId]
+      );
+
+      if (existing.rows.length > 0) {
+        return res.status(400).json({ error: 'User is already a project member' });
+      }
+
+      const result = await pool.query(
+        `INSERT INTO project_members (project_id, user_id, role)
+         VALUES ($1, $2, $3) RETURNING *`,
+        [req.params.projectId, userId, role]
+      );
+
+      await logAudit(req.user.userId, 'create', 'project_member', result.rows[0].id, {
+        project_id: req.params.projectId, added_user_id: userId, role: role
+      }, req);
+
+      const memberDetails = await pool.query(
+        `SELECT pm.*, u.first_name, u.last_name, u.email
+         FROM project_members pm JOIN users u ON pm.user_id = u.id
+         WHERE pm.id = $1`,
+        [result.rows[0].id]
+      );
+
+      res.status(201).json({ member: memberDetails.rows[0] });
+    } catch (error) {
+      next(error);
+    }
+});
+
+// Update member role
+app.put('/api/v1/project-members/:id/role',
+  authenticateToken, checkPermission('project_manager'),
+  async (req, res, next) => {
+    try {
+      const { role } = req.body;
+      const validRoles = ['viewer', 'subcontractor', 'engineer', 'superintendent', 'project_manager', 'admin'];
+      if (!validRoles.includes(role)) {
+        return res.status(400).json({ error: 'Invalid role' });
+      }
+
+      const oldData = await pool.query(
+        'SELECT role, user_id, project_id FROM project_members WHERE id = $1',
+        [req.params.id]
+      );
+
+      if (oldData.rows.length === 0) {
+        return res.status(404).json({ error: 'Project member not found' });
+      }
+
+      const result = await pool.query(
+        `UPDATE project_members SET role = $1 WHERE id = $2 RETURNING *`,
+        [role, req.params.id]
+      );
+
+      await logAudit(req.user.userId, 'update', 'project_member', req.params.id, {
+        field: 'role', old_value: oldData.rows[0].role, new_value: role,
+        user_id: oldData.rows[0].user_id, project_id: oldData.rows[0].project_id
+      }, req);
+
+      res.json({ member: result.rows[0] });
+    } catch (error) {
+      next(error);
+    }
+});
+
+// Remove member from project
+app.delete('/api/v1/project-members/:id',
+  authenticateToken, checkPermission('project_manager'),
+  async (req, res, next) => {
+    try {
+      const memberData = await pool.query(
+        'SELECT user_id, project_id, role FROM project_members WHERE id = $1',
+        [req.params.id]
+      );
+
+      if (memberData.rows.length === 0) {
+        return res.status(404).json({ error: 'Project member not found' });
+      }
+
+      if (memberData.rows[0].user_id === req.user.userId) {
+        return res.status(400).json({ error: 'You cannot remove yourself from the project' });
+      }
+
+      await pool.query('DELETE FROM project_members WHERE id = $1', [req.params.id]);
+
+      await logAudit(req.user.userId, 'delete', 'project_member', req.params.id, {
+        removed_user_id: memberData.rows[0].user_id,
+        project_id: memberData.rows[0].project_id,
+        role: memberData.rows[0].role
+      }, req);
+
+      res.json({ success: true });
+    } catch (error) {
+      next(error);
+    }
+});
+
+// Search users
+app.get('/api/v1/users/search',
+  authenticateToken, checkPermission('project_manager', { requireProject: false }),
+  async (req, res, next) => {
+    try {
+      const { q } = req.query;
+      if (!q || q.length < 2) {
+        return res.status(400).json({ error: 'Search query must be at least 2 characters' });
+      }
+
+      const result = await pool.query(
+        `SELECT id, email, first_name, last_name
+         FROM users
+         WHERE (email ILIKE $1 OR first_name ILIKE $1 OR last_name ILIKE $1)
+         LIMIT 20`,
+        [`%${q}%`]
+      );
+
+      res.json({ users: result.rows });
+    } catch (error) {
+      next(error);
+    }
+});
+
+// Get role definitions
+app.get('/api/v1/roles', authenticateToken, async (req, res, next) => {
+  try {
+    const roles = [
+      { name: 'viewer', level: 1, display_name: 'Viewer',
+        description: 'Read-only access to project information',
+        typical_users: 'Owners, clients, inspectors, external stakeholders' },
+      { name: 'subcontractor', level: 2, display_name: 'Subcontractor',
+        description: 'Can create RFIs, submit daily logs, and upload documents',
+        typical_users: 'Specialty trade contractors, vendors' },
+      { name: 'engineer', level: 3, display_name: 'Engineer',
+        description: 'Manage schedule, create technical documents, respond to RFIs',
+        typical_users: 'Field engineers, assistant project engineers' },
+      { name: 'superintendent', level: 4, display_name: 'Superintendent',
+        description: 'Manage daily operations, punch lists, quality control',
+        typical_users: 'Site superintendents, construction managers' },
+      { name: 'project_manager', level: 5, display_name: 'Project Manager',
+        description: 'Full project control including budget and team management',
+        typical_users: 'Project managers, senior construction managers' },
+      { name: 'admin', level: 6, display_name: 'Administrator',
+        description: 'All permissions plus system administration',
+        typical_users: 'Company admins, IT staff' }
+    ];
+    res.json({ roles });
   } catch (error) {
     next(error);
   }
