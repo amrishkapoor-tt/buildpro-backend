@@ -6,6 +6,235 @@ This guide will help you verify that the RBAC system is working correctly by tes
 
 ---
 
+## Role Permissions Reference
+
+This section explicitly lists what each role can and cannot do across all modules.
+
+### Role Hierarchy
+Roles inherit permissions from lower roles:
+- **Level 1:** Viewer (Read-only)
+- **Level 2:** Subcontractor (+ Basic creation)
+- **Level 3:** Engineer (+ Technical management)
+- **Level 4:** Superintendent (+ Verification & deletion)
+- **Level 5:** Project Manager (+ Team & budget management)
+- **Level 6:** Admin (Full access)
+
+---
+
+### 1. Viewer (Level 1) - Read-Only Access
+
+#### ✅ CAN DO:
+- View all documents, folders, and files
+- View all RFIs and their responses
+- View all submittals and their status
+- View daily logs
+- View punch list items
+- View schedule and tasks
+- View photos and albums
+- View drawings
+- View team members and their roles
+- View role information
+
+#### ❌ CANNOT DO:
+- Upload or delete documents
+- Create or edit folders
+- Create, edit, or respond to RFIs
+- Change RFI status
+- Create submittals or review them
+- Create or edit daily logs
+- Create, verify, or close punch items
+- Create or edit schedule tasks
+- Upload or delete photos
+- Create albums
+- Upload or delete drawings
+- View financials/budget
+- Create change events
+- Approve change orders
+- Add or remove team members
+- Change team member roles
+
+---
+
+### 2. Subcontractor (Level 2) - Basic Creation Rights
+
+#### ✅ CAN DO (Everything Viewer can do, PLUS):
+- **Documents:** Upload documents (but cannot delete)
+- **RFIs:** Create RFIs and add responses
+- **Submittals:** Create submittal packages and submittals
+- **Daily Logs:** Create and edit daily logs
+- **Photos:** Upload photos to existing albums
+- **Drawings:** Create markups on drawings
+
+#### ❌ CANNOT DO:
+- **Documents:** Delete documents, create folders
+- **RFIs:** Change RFI status (open/close)
+- **Submittals:** Approve submittals
+- **Schedule:** Create or edit tasks
+- **Punch List:** Create, verify, or close punch items
+- **Photos:** Create albums, delete photos
+- **Drawings:** Upload drawing sets, delete drawings
+- **Financials:** View budget, create change events, approve change orders
+- **Team:** Add/remove members, change roles
+
+---
+
+### 3. Engineer (Level 3) - Technical Management
+
+#### ✅ CAN DO (Everything Subcontractor can do, PLUS):
+- **Documents:** Create folders, edit document metadata
+- **RFIs:** Change RFI status (mark as answered, closed)
+- **Schedule:** Create, edit, and delete tasks
+- **Punch List:** Create punch items (but cannot verify or close)
+- **Photos:** Create albums
+- **Drawings:** Upload drawing sets and sheets
+- **Financials:** Create change events
+- **Daily Logs:** Edit any daily logs
+
+#### ❌ CANNOT DO:
+- **Documents:** Delete documents
+- **Submittals:** Approve submittals
+- **Punch List:** Verify or close punch items
+- **Photos:** Delete photos
+- **Drawings:** Delete drawings
+- **Financials:** View full budget, edit budget, approve change orders
+- **Team:** Add/remove members, change roles
+- **Schedule:** Create baselines
+
+---
+
+### 4. Superintendent (Level 4) - Verification & Deletion Rights
+
+#### ✅ CAN DO (Everything Engineer can do, PLUS):
+- **Documents:** Delete documents
+- **Submittals:** Approve submittals
+- **Punch List:** Verify and close punch items
+- **Photos:** Delete photos
+- **Drawings:** Delete drawings
+- **Financials:** View budget summary
+
+#### ❌ CANNOT DO:
+- **Financials:** Edit budget, approve change orders
+- **Team:** Add/remove members, change roles
+- **Schedule:** Create baselines
+
+---
+
+### 5. Project Manager (Level 5) - Team & Budget Management
+
+#### ✅ CAN DO (Everything Superintendent can do, PLUS):
+- **Team Management:**
+  - Add team members to project
+  - Remove team members from project
+  - Change team member roles
+  - Search for users in system
+- **Financials:**
+  - View full budget details
+  - Edit budget lines
+  - Approve change orders
+  - Convert change events to change orders
+- **Schedule:** Create baselines
+
+#### ❌ CANNOT DO:
+- Nothing - Project Managers have full access except Admin-level system settings
+
+---
+
+### 6. Admin (Level 6) - Full System Access
+
+#### ✅ CAN DO:
+- Everything a Project Manager can do
+- System-wide administration (if implemented)
+- Manage organization settings (if implemented)
+
+---
+
+## Permission Matrix by Module
+
+### 📄 Documents Module
+| Action | Viewer | Subcontractor | Engineer | Superintendent | PM | Admin |
+|--------|--------|---------------|----------|----------------|-----|-------|
+| View documents | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Upload documents | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Create folders | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Edit documents | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Delete documents | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+
+### 📝 RFIs Module
+| Action | Viewer | Subcontractor | Engineer | Superintendent | PM | Admin |
+|--------|--------|---------------|----------|----------------|-----|-------|
+| View RFIs | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Create RFIs | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Respond to RFIs | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Change RFI status | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
+
+### 📋 Submittals Module
+| Action | Viewer | Subcontractor | Engineer | Superintendent | PM | Admin |
+|--------|--------|---------------|----------|----------------|-----|-------|
+| View submittals | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Create submittals | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Submit for review | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Approve submittals | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+
+### 📅 Daily Logs Module
+| Action | Viewer | Subcontractor | Engineer | Superintendent | PM | Admin |
+|--------|--------|---------------|----------|----------------|-----|-------|
+| View logs | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Create logs | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Edit own logs | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Edit any logs | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
+
+### 🔨 Punch List Module
+| Action | Viewer | Subcontractor | Engineer | Superintendent | PM | Admin |
+|--------|--------|---------------|----------|----------------|-----|-------|
+| View punch items | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Create punch items | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Update status (open/in progress/completed) | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Verify punch items | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| Close punch items | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+
+### 📅 Schedule Module
+| Action | Viewer | Subcontractor | Engineer | Superintendent | PM | Admin |
+|--------|--------|---------------|----------|----------------|-----|-------|
+| View schedule | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Create tasks | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Edit tasks | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Delete tasks | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Create baselines | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+
+### 📸 Photos Module
+| Action | Viewer | Subcontractor | Engineer | Superintendent | PM | Admin |
+|--------|--------|---------------|----------|----------------|-----|-------|
+| View photos | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Upload photos | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Create albums | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Delete photos | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+
+### 📐 Drawings Module
+| Action | Viewer | Subcontractor | Engineer | Superintendent | PM | Admin |
+|--------|--------|---------------|----------|----------------|-----|-------|
+| View drawings | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Create markups | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Upload drawings | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Delete drawings | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+
+### 💰 Financials Module
+| Action | Viewer | Subcontractor | Engineer | Superintendent | PM | Admin |
+|--------|--------|---------------|----------|----------------|-----|-------|
+| View budget | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| Edit budget | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Create change events | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Approve change orders | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+
+### 👥 Team Management Module
+| Action | Viewer | Subcontractor | Engineer | Superintendent | PM | Admin |
+|--------|--------|---------------|----------|----------------|-----|-------|
+| View team members | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Add members | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Remove members | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Change roles | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+
+---
+
 ## Prerequisites
 
 1. ✅ Migration has been run (`run-rbac-migration.js`)
