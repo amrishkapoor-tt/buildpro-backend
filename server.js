@@ -402,6 +402,18 @@ app.delete('/api/v1/documents/:id', authenticateToken, checkPermission('superint
       );
     }
 
+    // Delete entity links where this document is the source
+    await pool.query(
+      "DELETE FROM entity_links WHERE source_type = 'document' AND source_id = $1",
+      [req.params.id]
+    );
+
+    // Delete entity links where this document is the target
+    await pool.query(
+      "DELETE FROM entity_links WHERE target_type = 'document' AND target_id = $1",
+      [req.params.id]
+    );
+
     // Delete the document
     await pool.query('DELETE FROM documents WHERE id = $1', [req.params.id]);
 
