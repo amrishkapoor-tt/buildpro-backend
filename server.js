@@ -1340,15 +1340,22 @@ app.get('/api/v1/documents/:id/preview', async (req, res, next) => {
     // Support token in query parameter for iframe/img tag loading
     const token = req.query.token || (req.headers['authorization'] && req.headers['authorization'].split(' ')[1]);
 
+    console.log('Preview request for document:', req.params.id);
+    console.log('Token present:', !!token);
+
     if (!token) {
+      console.error('No token provided for preview');
       return res.status(401).json({ error: 'Access token required' });
     }
 
     // Verify token
     jwt.verify(token, JWT_SECRET, async (err, user) => {
       if (err) {
-        return res.status(403).json({ error: 'Invalid token' });
+        console.error('Token verification failed:', err.message);
+        return res.status(403).json({ error: 'Invalid token', details: err.message });
       }
+
+      console.log('Token verified for user:', user.userId);
 
       try {
         const result = await pool.query(
@@ -1356,25 +1363,42 @@ app.get('/api/v1/documents/:id/preview', async (req, res, next) => {
           [req.params.id]
         );
 
-        if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
+        if (result.rows.length === 0) {
+          console.error('Document not found:', req.params.id);
+          return res.status(404).json({ error: 'Document not found' });
+        }
 
         const { file_path, mime_type, name } = result.rows[0];
+        console.log('Document found:', { file_path, mime_type, name, storageType });
 
         if (storageType === 'local') {
           // Direct file serving for local storage
+          const fullPath = path.resolve(file_path);
+          console.log('Serving file from:', fullPath);
+
+          // Check if file exists
+          const fs = require('fs');
+          if (!fs.existsSync(fullPath)) {
+            console.error('File not found on disk:', fullPath);
+            return res.status(404).json({ error: 'File not found on disk', path: fullPath });
+          }
+
           res.setHeader('Content-Type', mime_type);
           res.setHeader('Content-Disposition', `inline; filename="${name}"`);
-          res.sendFile(path.resolve(file_path));
+          res.sendFile(fullPath);
         } else {
           // Redirect to signed URL for cloud storage
+          console.log('Generating signed URL for cloud storage');
           const signedUrl = await storage.getSignedUrl(file_path, 3600);
           res.redirect(signedUrl);
         }
       } catch (error) {
+        console.error('Error in preview endpoint:', error);
         next(error);
       }
     });
   } catch (error) {
+    console.error('Error in preview endpoint outer try:', error);
     next(error);
   }
 });
