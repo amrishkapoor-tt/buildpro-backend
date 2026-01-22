@@ -1335,13 +1335,31 @@ app.post('/api/v1/documents/bulk-categorize', authenticateToken, checkPermission
 });
 
 // DOCUMENT PREVIEW
+// Handle CORS preflight for preview endpoint
+app.options('/api/v1/documents/:id/preview', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.sendStatus(200);
+});
+
 app.get('/api/v1/documents/:id/preview', async (req, res, next) => {
   try {
+    // Set CORS headers explicitly for image loading
+    res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+
     // Support token in query parameter for iframe/img tag loading
     const token = req.query.token || (req.headers['authorization'] && req.headers['authorization'].split(' ')[1]);
 
     console.log('Preview request for document:', req.params.id);
     console.log('Token present:', !!token);
+    console.log('Origin:', req.headers.origin);
 
     if (!token) {
       console.error('No token provided for preview');
@@ -1404,8 +1422,23 @@ app.get('/api/v1/documents/:id/preview', async (req, res, next) => {
 });
 
 // Download document
+// Handle CORS preflight for download endpoint
+app.options('/api/v1/documents/:id/download', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  res.sendStatus(200);
+});
+
 app.get('/api/v1/documents/:id/download', async (req, res, next) => {
   try {
+    // Set CORS headers explicitly for cross-origin downloads
+    res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+
     // Support token in query parameter for direct download links
     const token = req.query.token || (req.headers['authorization'] && req.headers['authorization'].split(' ')[1]);
 
