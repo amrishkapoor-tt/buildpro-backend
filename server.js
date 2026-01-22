@@ -445,37 +445,66 @@ app.delete('/api/v1/documents/:id', authenticateToken, checkPermission('superint
   }
 });
 
-app.post('/api/v1/projects/:projectId/documents', authenticateToken, checkPermission('subcontractor'), upload.single('file'), async (req, res, next) => {
+app.post('/api/v1/projects/:projectId/documents', authenticateToken, checkPermission('subcontractor'), upload.fields([{ name: 'file', maxCount: 1 }, { name: 'document', maxCount: 1 }]), async (req, res, next) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-    const { name } = req.body;
+    // Handle both 'file' and 'document' field names
+    const uploadedFile = req.files?.file?.[0] || req.files?.document?.[0];
+    if (!uploadedFile) return res.status(400).json({ error: 'No file uploaded' });
+
+    const {
+      name, description, tags, category, folder_id,
+      drawing_number, discipline, sheet_title, revision_number,
+      drawing_scale, sheet_size, issue_date, is_current_revision
+    } = req.body;
 
     // Handle file storage based on storage type
     let filePath, fileUrl;
     if (storageType === 'local') {
-      filePath = req.file.path;
-      fileUrl = `/uploads/${path.basename(req.file.path)}`;
+      filePath = uploadedFile.path;
+      fileUrl = `/uploads/${path.basename(uploadedFile.path)}`;
     } else {
       const uploadResult = await storage.uploadBuffer(
-        req.file.buffer,
-        req.file.originalname,
-        { mimetype: req.file.mimetype, projectId: req.params.projectId }
+        uploadedFile.buffer,
+        uploadedFile.originalname,
+        { mimetype: uploadedFile.mimetype, projectId: req.params.projectId }
       );
       filePath = uploadResult.path;
       fileUrl = uploadResult.url;
     }
 
     const result = await pool.query(
-      `INSERT INTO documents (project_id, name, file_path, file_size, mime_type, uploaded_by)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [req.params.projectId, name || req.file.originalname, filePath, req.file.size, req.file.mimetype, req.user.userId]
+      `INSERT INTO documents (
+        project_id, name, description, tags, category, folder_id, file_path, file_size, mime_type, uploaded_by,
+        drawing_number, discipline, sheet_title, revision_number, drawing_scale, sheet_size, issue_date, is_current_revision
+      )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) RETURNING *`,
+      [
+        req.params.projectId,
+        name || uploadedFile.originalname,
+        description,
+        tags ? (Array.isArray(tags) ? tags : tags.split(',').map(t => t.trim())) : null,
+        category,
+        folder_id || null,
+        filePath,
+        uploadedFile.size,
+        uploadedFile.mimetype,
+        req.user.userId,
+        drawing_number || null,
+        discipline || null,
+        sheet_title || null,
+        revision_number || null,
+        drawing_scale || null,
+        sheet_size || null,
+        issue_date || null,
+        is_current_revision !== undefined ? is_current_revision === 'true' || is_current_revision === true : null
+      ]
     );
 
     // Create initial version entry (Version 1)
     await pool.query(
       `INSERT INTO document_versions (document_id, version_number, file_path, file_size, uploaded_by, version_name, is_current)
        VALUES ($1, 1, $2, $3, $4, 'Original', true)`,
-      [result.rows[0].id, filePath, req.file.size, req.user.userId]
+      [result.rows[0].id, filePath, uploadedFile.size, req.user.userId]
     );
 
     await emitEvent('document.uploaded', 'document', result.rows[0].id, req.params.projectId, req.user.userId, result.rows[0]);
@@ -512,13 +541,35 @@ app.get('/api/v1/projects/:projectId/documents', authenticateToken, async (req, 
 // Update document metadata
 app.put('/api/v1/documents/:id', authenticateToken, checkPermission('engineer'), async (req, res, next) => {
   try {
-    const { name, description, tags, category } = req.body;
+    const {
+      name, description, tags, category,
+      drawing_number, discipline, sheet_title, revision_number,
+      drawing_scale, sheet_size, issue_date, is_current_revision
+    } = req.body;
+
     const result = await pool.query(
-      `UPDATE documents SET name = COALESCE($1, name), description = COALESCE($2, description),
-       tags = COALESCE($3, tags), category = COALESCE($4, category)
-       WHERE id = $5 RETURNING *`,
-      [name, description, tags, category, req.params.id]
+      `UPDATE documents SET
+        name = COALESCE($1, name),
+        description = COALESCE($2, description),
+        tags = COALESCE($3, tags),
+        category = COALESCE($4, category),
+        drawing_number = COALESCE($5, drawing_number),
+        discipline = COALESCE($6, discipline),
+        sheet_title = COALESCE($7, sheet_title),
+        revision_number = COALESCE($8, revision_number),
+        drawing_scale = COALESCE($9, drawing_scale),
+        sheet_size = COALESCE($10, sheet_size),
+        issue_date = COALESCE($11, issue_date),
+        is_current_revision = COALESCE($12, is_current_revision)
+       WHERE id = $13 RETURNING *`,
+      [
+        name, description, tags, category,
+        drawing_number, discipline, sheet_title, revision_number,
+        drawing_scale, sheet_size, issue_date, is_current_revision,
+        req.params.id
+      ]
     );
+
     if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
     res.json({ document: result.rows[0] });
   } catch (error) {
@@ -772,21 +823,24 @@ app.delete('/api/v1/folders/:id', authenticateToken, checkPermission('superinten
 
 // DOCUMENT VERSIONING
 // Upload new version
-app.post('/api/v1/documents/:id/versions', authenticateToken, checkPermission('subcontractor'), upload.single('file'), async (req, res, next) => {
+app.post('/api/v1/documents/:id/versions', authenticateToken, checkPermission('subcontractor'), upload.fields([{ name: 'file', maxCount: 1 }, { name: 'document', maxCount: 1 }]), async (req, res, next) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    // Handle both 'file' and 'document' field names
+    const uploadedFile = req.files?.file?.[0] || req.files?.document?.[0];
+    if (!uploadedFile) return res.status(400).json({ error: 'No file uploaded' });
+
     const { version_name, change_description } = req.body;
 
     // Handle file storage based on storage type
     let filePath, fileUrl;
     if (storageType === 'local') {
-      filePath = req.file.path;
-      fileUrl = `/uploads/${path.basename(req.file.path)}`;
+      filePath = uploadedFile.path;
+      fileUrl = `/uploads/${path.basename(uploadedFile.path)}`;
     } else {
       const uploadResult = await storage.uploadBuffer(
-        req.file.buffer,
-        req.file.originalname,
-        { mimetype: req.file.mimetype, documentId: req.params.id }
+        uploadedFile.buffer,
+        uploadedFile.originalname,
+        { mimetype: uploadedFile.mimetype, documentId: req.params.id }
       );
       filePath = uploadResult.path;
       fileUrl = uploadResult.url;
@@ -809,13 +863,13 @@ app.post('/api/v1/documents/:id/versions', authenticateToken, checkPermission('s
     const result = await pool.query(
       `INSERT INTO document_versions (document_id, version_number, file_path, file_size, uploaded_by, version_name, change_description, is_current)
        VALUES ($1, $2, $3, $4, $5, $6, $7, true) RETURNING *`,
-      [req.params.id, newVersionNumber, filePath, req.file.size, req.user.userId, version_name, change_description]
+      [req.params.id, newVersionNumber, filePath, uploadedFile.size, req.user.userId, version_name, change_description]
     );
 
     // Update main document file_path to new version
     await pool.query(
       'UPDATE documents SET file_path = $1, file_size = $2 WHERE id = $3',
-      [filePath, req.file.size, req.params.id]
+      [filePath, uploadedFile.size, req.params.id]
     );
 
     res.status(201).json({ version: result.rows[0] });
