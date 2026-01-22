@@ -414,6 +414,21 @@ app.delete('/api/v1/documents/:id', authenticateToken, checkPermission('superint
       [req.params.id]
     );
 
+    // Delete drawing-related data (these have CASCADE but explicit delete is clearer)
+    // The CASCADE will handle these, but we'll delete explicitly for clarity
+    try {
+      await pool.query('DELETE FROM drawing_workflow_states WHERE document_id = $1', [req.params.id]);
+      await pool.query('DELETE FROM drawing_workflow_history WHERE document_id = $1', [req.params.id]);
+      await pool.query('DELETE FROM drawing_markups WHERE document_id = $1', [req.params.id]);
+      await pool.query('DELETE FROM drawing_reviews WHERE document_id = $1', [req.params.id]);
+      await pool.query('DELETE FROM drawing_distributions WHERE document_id = $1', [req.params.id]);
+      await pool.query('DELETE FROM asi_drawings WHERE document_id = $1', [req.params.id]);
+      await pool.query('DELETE FROM drawing_set_members WHERE document_id = $1', [req.params.id]);
+    } catch (cleanupError) {
+      console.warn('Drawing data cleanup warning:', cleanupError.message);
+      // Continue with deletion even if cleanup fails
+    }
+
     // Delete the document
     await pool.query('DELETE FROM documents WHERE id = $1', [req.params.id]);
 
