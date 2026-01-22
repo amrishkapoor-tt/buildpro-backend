@@ -366,11 +366,11 @@ app.post('/api/v1/projects', authenticateToken, async (req, res, next) => {
 });
 
 // DOCUMENTS
-app.delete('/api/v1/documents/:id', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
+app.delete('/api/v1/documents/:id', authenticateToken, async (req, res, next) => {
   try {
-    // Get document and its file path
+    // Get document details first
     const docResult = await pool.query(
-      'SELECT file_path FROM documents WHERE id = $1',
+      'SELECT file_path, project_id FROM documents WHERE id = $1',
       [req.params.id]
     );
 
@@ -378,7 +378,37 @@ app.delete('/api/v1/documents/:id', authenticateToken, checkPermission('superint
       return res.status(404).json({ error: 'Document not found' });
     }
 
-    const mainFilePath = docResult.rows[0].file_path;
+    const document = docResult.rows[0];
+    const mainFilePath = document.file_path;
+    const projectId = document.project_id;
+
+    // Check permissions using the document's project_id
+    if (!projectId) {
+      return res.status(400).json({ error: 'Document has no associated project' });
+    }
+
+    // Verify user has permission to delete in this project
+    const memberResult = await pool.query(
+      'SELECT role FROM project_members WHERE project_id = $1 AND user_id = $2',
+      [projectId, req.user.userId]
+    );
+
+    if (memberResult.rows.length === 0) {
+      return res.status(403).json({ error: 'Access denied. You must be a project member.' });
+    }
+
+    const userRole = memberResult.rows[0].role;
+    const roleHierarchy = {
+      'viewer': 1, 'subcontractor': 2, 'engineer': 3,
+      'superintendent': 4, 'project_manager': 5, 'admin': 6
+    };
+
+    if (roleHierarchy[userRole] < roleHierarchy['superintendent']) {
+      return res.status(403).json({
+        error: 'Insufficient permissions. Requires superintendent role or higher.',
+        user_role: userRole
+      });
+    }
 
     // Get document version IDs and file paths for this document
     const versions = await pool.query(
