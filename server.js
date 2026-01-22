@@ -1379,6 +1379,51 @@ app.get('/api/v1/documents/:id/preview', async (req, res, next) => {
   }
 });
 
+// Download document
+app.get('/api/v1/documents/:id/download', async (req, res, next) => {
+  try {
+    // Support token in query parameter for direct download links
+    const token = req.query.token || (req.headers['authorization'] && req.headers['authorization'].split(' ')[1]);
+
+    if (!token) {
+      return res.status(401).json({ error: 'Access token required' });
+    }
+
+    // Verify token
+    jwt.verify(token, JWT_SECRET, async (err, user) => {
+      if (err) {
+        return res.status(403).json({ error: 'Invalid token' });
+      }
+
+      try {
+        const result = await pool.query(
+          'SELECT file_path, mime_type, name FROM documents WHERE id = $1',
+          [req.params.id]
+        );
+
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Document not found' });
+
+        const { file_path, mime_type, name } = result.rows[0];
+
+        if (storageType === 'local') {
+          // Direct file download for local storage
+          res.setHeader('Content-Type', mime_type);
+          res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+          res.sendFile(path.resolve(file_path));
+        } else {
+          // Redirect to signed URL for cloud storage
+          const signedUrl = await storage.getSignedUrl(file_path, 3600);
+          res.redirect(signedUrl);
+        }
+      } catch (error) {
+        next(error);
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // RFIS
 app.post('/api/v1/projects/:projectId/rfis', authenticateToken, checkPermission('subcontractor'), async (req, res, next) => {
   try {
