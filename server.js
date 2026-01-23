@@ -17,8 +17,14 @@ const { upload, storageType } = require('./middleware/upload');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const JWT_SECRET = process.env.JWT_SECRET || 'change-this-in-production';
+const JWT_SECRET = process.env.JWT_SECRET;
 const DATABASE_URL = process.env.DATABASE_URL;
+
+if (!JWT_SECRET) {
+  console.error('❌ JWT_SECRET environment variable is required for security');
+  console.error('Please set JWT_SECRET to a strong random value (e.g., openssl rand -base64 32)');
+  process.exit(1);
+}
 
 if (!DATABASE_URL) {
   console.error('❌ DATABASE_URL not set');
@@ -1916,6 +1922,44 @@ app.put('/api/v1/drawing-markups/:markupId', authenticateToken, async (req, res,
   try {
     const { markup_data, status, comment, color } = req.body;
 
+    // First, fetch the markup to check ownership and get project_id
+    const markupCheck = await pool.query(
+      `SELECT dm.created_by, d.project_id
+       FROM drawing_markups dm
+       JOIN documents d ON d.id = dm.document_id
+       WHERE dm.id = $1`,
+      [req.params.markupId]
+    );
+
+    if (markupCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Markup not found' });
+    }
+
+    const markup = markupCheck.rows[0];
+
+    // Check if user owns the markup OR has engineer+ role in the project
+    if (markup.created_by !== req.user.userId) {
+      // Check user's role in the project
+      const roleCheck = await pool.query(
+        `SELECT role FROM project_members WHERE project_id = $1 AND user_id = $2`,
+        [markup.project_id, req.user.userId]
+      );
+
+      if (roleCheck.rows.length === 0) {
+        return res.status(403).json({ error: 'Access denied. You must be a project member.' });
+      }
+
+      const roleHierarchy = {
+        'viewer': 1, 'subcontractor': 2, 'engineer': 3,
+        'superintendent': 4, 'project_manager': 5, 'admin': 6
+      };
+
+      if (roleHierarchy[roleCheck.rows[0].role] < roleHierarchy['engineer']) {
+        return res.status(403).json({ error: 'You can only update your own markups. Engineer role or higher required to modify others.' });
+      }
+    }
+
+    // Now perform the update
     const result = await pool.query(
       `UPDATE drawing_markups
        SET markup_data = COALESCE($1, markup_data),
@@ -1963,14 +2007,38 @@ app.post('/api/v1/drawing-markups/:markupId/resolve', authenticateToken, checkPe
 app.delete('/api/v1/drawing-markups/:markupId', authenticateToken, async (req, res, next) => {
   try {
     // Check if user created this markup or has permission
-    const markup = await pool.query('SELECT created_by FROM drawing_markups WHERE id = $1', [req.params.markupId]);
+    const markup = await pool.query(
+      `SELECT dm.created_by, d.project_id
+       FROM drawing_markups dm
+       JOIN documents d ON d.id = dm.document_id
+       WHERE dm.id = $1`,
+      [req.params.markupId]
+    );
+
     if (markup.rows.length === 0) {
       return res.status(404).json({ error: 'Markup not found' });
     }
 
-    // Allow deletion if user created it or has superintendent permission
-    if (markup.rows[0].created_by !== req.user.userId && req.user.role !== 'superintendent' && req.user.role !== 'project_manager') {
-      return res.status(403).json({ error: 'Unauthorized' });
+    // Allow deletion if user created it OR has superintendent+ role in the project
+    if (markup.rows[0].created_by !== req.user.userId) {
+      // Check user's role in the project
+      const roleCheck = await pool.query(
+        `SELECT role FROM project_members WHERE project_id = $1 AND user_id = $2`,
+        [markup.rows[0].project_id, req.user.userId]
+      );
+
+      if (roleCheck.rows.length === 0) {
+        return res.status(403).json({ error: 'Access denied. You must be a project member.' });
+      }
+
+      const roleHierarchy = {
+        'viewer': 1, 'subcontractor': 2, 'engineer': 3,
+        'superintendent': 4, 'project_manager': 5, 'admin': 6
+      };
+
+      if (roleHierarchy[roleCheck.rows[0].role] < roleHierarchy['superintendent']) {
+        return res.status(403).json({ error: 'You can only delete your own markups. Superintendent role or higher required to delete others.' });
+      }
     }
 
     await pool.query('DELETE FROM drawing_markups WHERE id = $1', [req.params.markupId]);
@@ -1987,32 +2055,70 @@ app.delete('/api/v1/drawing-markups/:markupId', authenticateToken, async (req, r
 // Get reviews for a drawing
 app.get('/api/v1/drawings/:documentId/reviews', authenticateToken, async (req, res, next) => {
   try {
+    // Single query to fetch all reviews with their checklist items (fix N+1 problem)
     const result = await pool.query(
       `SELECT dr.*,
        u.first_name || ' ' || u.last_name as reviewer_name,
-       ur.first_name || ' ' || ur.last_name as requested_by_name
+       ur.first_name || ' ' || ur.last_name as requested_by_name,
+       drc.id as checklist_id,
+       drc.item_description,
+       drc.is_checked,
+       drc.notes as checklist_notes,
+       drc.checked_by,
+       drc.checked_at,
+       drc.created_at as checklist_created_at,
+       uc.first_name || ' ' || uc.last_name as checked_by_name
        FROM drawing_reviews dr
        LEFT JOIN users u ON dr.reviewer_id = u.id
        LEFT JOIN users ur ON dr.requested_by = ur.id
+       LEFT JOIN drawing_review_checklist drc ON drc.review_id = dr.id
+       LEFT JOIN users uc ON drc.checked_by = uc.id
        WHERE dr.document_id = $1
-       ORDER BY dr.created_at DESC`,
+       ORDER BY dr.created_at DESC, drc.created_at ASC`,
       [req.params.documentId]
     );
 
-    // Get checklist items for each review
-    for (let review of result.rows) {
-      const checklistResult = await pool.query(
-        `SELECT drc.*, u.first_name || ' ' || u.last_name as checked_by_name
-         FROM drawing_review_checklist drc
-         LEFT JOIN users u ON drc.checked_by = u.id
-         WHERE drc.review_id = $1
-         ORDER BY drc.created_at`,
-        [review.id]
-      );
-      review.checklist = checklistResult.rows;
+    // Group checklist items by review
+    const reviewsMap = new Map();
+    for (let row of result.rows) {
+      if (!reviewsMap.has(row.id)) {
+        // Create review object (only review fields, not checklist fields)
+        reviewsMap.set(row.id, {
+          id: row.id,
+          document_id: row.document_id,
+          reviewer_id: row.reviewer_id,
+          reviewer_name: row.reviewer_name,
+          discipline: row.discipline,
+          review_status: row.review_status,
+          review_notes: row.review_notes,
+          clash_detected: row.clash_detected,
+          clash_description: row.clash_description,
+          requested_by: row.requested_by,
+          requested_by_name: row.requested_by_name,
+          requested_at: row.requested_at,
+          completed_at: row.completed_at,
+          created_at: row.created_at,
+          updated_at: row.updated_at,
+          checklist: []
+        });
+      }
+
+      // Add checklist item if it exists
+      if (row.checklist_id) {
+        reviewsMap.get(row.id).checklist.push({
+          id: row.checklist_id,
+          item_description: row.item_description,
+          is_checked: row.is_checked,
+          notes: row.checklist_notes,
+          checked_by: row.checked_by,
+          checked_by_name: row.checked_by_name,
+          checked_at: row.checked_at,
+          created_at: row.checklist_created_at
+        });
+      }
     }
 
-    res.json({ reviews: result.rows });
+    res.json({ reviews: Array.from(reviewsMap.values()) });
   } catch (error) {
     next(error);
   }
@@ -2059,14 +2165,39 @@ app.put('/api/v1/drawing-reviews/:reviewId', authenticateToken, async (req, res,
   try {
     const { review_status, review_notes, clash_detected, clash_description } = req.body;
 
-    // Check if user is the assigned reviewer
-    const review = await pool.query('SELECT reviewer_id FROM drawing_reviews WHERE id = $1', [req.params.reviewId]);
+    // Check if user is the assigned reviewer and get project_id
+    const review = await pool.query(
+      `SELECT dr.reviewer_id, d.project_id
+       FROM drawing_reviews dr
+       JOIN documents d ON d.id = dr.document_id
+       WHERE dr.id = $1`,
+      [req.params.reviewId]
+    );
+
     if (review.rows.length === 0) {
       return res.status(404).json({ error: 'Review not found' });
     }
 
-    if (review.rows[0].reviewer_id !== req.user.userId && req.user.role !== 'superintendent') {
-      return res.status(403).json({ error: 'Unauthorized' });
+    // Allow update if user is the reviewer OR has superintendent+ role in the project
+    if (review.rows[0].reviewer_id !== req.user.userId) {
+      // Check user's role in the project
+      const roleCheck = await pool.query(
+        `SELECT role FROM project_members WHERE project_id = $1 AND user_id = $2`,
+        [review.rows[0].project_id, req.user.userId]
+      );
+
+      if (roleCheck.rows.length === 0) {
+        return res.status(403).json({ error: 'Access denied. You must be a project member.' });
+      }
+
+      const roleHierarchy = {
+        'viewer': 1, 'subcontractor': 2, 'engineer': 3,
+        'superintendent': 4, 'project_manager': 5, 'admin': 6
+      };
+
+      if (roleHierarchy[roleCheck.rows[0].role] < roleHierarchy['superintendent']) {
+        return res.status(403).json({ error: 'Only the assigned reviewer or superintendent+ can update this review.' });
+      }
     }
 
     const result = await pool.query(
@@ -4933,6 +5064,21 @@ app.use((err, req, res, next) => {
 // ============================================================================
 app.post('/api/v1/admin/run-migration', authenticateToken, async (req, res) => {
   try {
+    // CRITICAL: Verify user has admin role in at least one project (system-wide admin operation)
+    const adminCheck = await pool.query(
+      `SELECT COUNT(*) as admin_count
+       FROM project_members
+       WHERE user_id = $1 AND role = 'admin'`,
+      [req.user.userId]
+    );
+
+    if (parseInt(adminCheck.rows[0].admin_count) === 0) {
+      return res.status(403).json({
+        error: 'Access denied. System admin role required to run migrations.',
+        required_permission: 'admin'
+      });
+    }
+
     const { migrationName } = req.body;
 
     if (!migrationName) {
@@ -4954,7 +5100,7 @@ app.post('/api/v1/admin/run-migration', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Migration file not found' });
     }
 
-    console.log(`🔄 Running migration: ${migrationName}`);
+    console.log(`🔄 Running migration: ${migrationName} by user ${req.user.userId}`);
     const sql = fs.readFileSync(migrationPath, 'utf8');
 
     const client = await pool.connect();
