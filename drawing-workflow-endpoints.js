@@ -658,8 +658,8 @@ app.delete('/api/v1/asis/:asiId', authenticateToken, async (req, res, next) => {
     // Set projectId for checkPermission middleware
     req.params.projectId = asiResult.rows[0].project_id;
 
-    // Check permission manually
-    const permissionCheck = checkPermission('superintendent');
+    // Check permission manually - same level as create (engineer)
+    const permissionCheck = checkPermission('engineer');
     await new Promise((resolve, reject) => {
       permissionCheck(req, res, (err) => {
         if (err) reject(err);
