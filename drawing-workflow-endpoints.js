@@ -646,8 +646,28 @@ app.post('/api/v1/asi-drawings/:asiDrawingId/complete', authenticateToken, check
 });
 
 // Delete ASI
-app.delete('/api/v1/asis/:asiId', authenticateToken, checkPermission('superintendent'), async (req, res, next) => {
+app.delete('/api/v1/asis/:asiId', authenticateToken, async (req, res, next) => {
   try {
+    // Get ASI to find its project_id for permission check
+    const asiResult = await pool.query('SELECT project_id FROM asis WHERE id = $1', [req.params.asiId]);
+
+    if (asiResult.rows.length === 0) {
+      return res.status(404).json({ error: 'ASI not found' });
+    }
+
+    // Set projectId for checkPermission middleware
+    req.params.projectId = asiResult.rows[0].project_id;
+
+    // Check permission manually
+    const permissionCheck = checkPermission('superintendent');
+    await new Promise((resolve, reject) => {
+      permissionCheck(req, res, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+
+    // Delete the ASI (CASCADE will delete related asi_drawings)
     await pool.query('DELETE FROM asis WHERE id = $1', [req.params.asiId]);
     res.json({ success: true });
   } catch (error) {
