@@ -479,7 +479,427 @@ function registerWorkflowRoutes(app, pool, authenticateToken) {
     }
   });
 
+  // ==========================================================================
+  // CREATE WORKFLOW TEMPLATE
+  // POST /api/v1/workflows/templates
+  // ==========================================================================
+
+  app.post('/api/v1/workflows/templates', authenticateToken, async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+      const { name, entity_type, description, is_active, stages, transitions } = req.body;
+
+      // Validation
+      if (!name || !entity_type) {
+        return res.status(400).json({
+          error: 'name and entity_type are required'
+        });
+      }
+
+      if (!stages || !Array.isArray(stages) || stages.length === 0) {
+        return res.status(400).json({
+          error: 'At least one stage is required'
+        });
+      }
+
+      await client.query('BEGIN');
+
+      // If this is set as default, unset other defaults for this entity type
+      if (req.body.is_default) {
+        await client.query(
+          `UPDATE workflow_templates SET is_default = false WHERE entity_type = $1`,
+          [entity_type]
+        );
+      }
+
+      // Create template
+      const templateResult = await client.query(
+        `INSERT INTO workflow_templates (name, entity_type, description, is_active, is_default, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING *`,
+        [name, entity_type, description, is_active !== false, req.body.is_default || false, req.user.userId]
+      );
+
+      const template = templateResult.rows[0];
+
+      // Create stages
+      const stageIdMap = {}; // Map temp IDs to real IDs
+
+      for (const stage of stages) {
+        const stageResult = await client.query(
+          `INSERT INTO workflow_stages (
+            workflow_template_id,
+            stage_number,
+            stage_name,
+            stage_type,
+            sla_hours,
+            assignment_rules,
+            actions,
+            description
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          RETURNING *`,
+          [
+            template.id,
+            stage.stage_number,
+            stage.stage_name,
+            stage.stage_type || 'approval',
+            stage.sla_hours || 48,
+            stage.assignment_rules || { type: 'role', role: '' },
+            stage.actions || ['approve', 'reject'],
+            stage.description
+          ]
+        );
+
+        // Map the temporary ID (from frontend) to the real database ID
+        stageIdMap[stage.stage_number] = stageResult.rows[0].id;
+      }
+
+      // Create transitions
+      if (transitions && Array.isArray(transitions)) {
+        for (const transition of transitions) {
+          // Find the actual stage IDs based on stage numbers or names
+          const fromStageResult = await client.query(
+            `SELECT id FROM workflow_stages
+             WHERE workflow_template_id = $1 AND stage_number = $2`,
+            [template.id, transition.from_stage_number || 1]
+          );
+
+          const toStageResult = await client.query(
+            `SELECT id FROM workflow_stages
+             WHERE workflow_template_id = $1 AND stage_number = $2`,
+            [template.id, transition.to_stage_number || 2]
+          );
+
+          if (fromStageResult.rows.length > 0 && toStageResult.rows.length > 0) {
+            await client.query(
+              `INSERT INTO workflow_transitions (
+                workflow_template_id,
+                from_stage_id,
+                to_stage_id,
+                transition_action,
+                transition_name,
+                is_automatic,
+                conditions
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+              [
+                template.id,
+                fromStageResult.rows[0].id,
+                toStageResult.rows[0].id,
+                transition.transition_action || 'approve',
+                transition.transition_name || 'Approve',
+                transition.is_automatic || false,
+                transition.conditions || {}
+              ]
+            );
+          }
+        }
+      }
+
+      await client.query('COMMIT');
+
+      // Fetch complete template with stages and transitions
+      const completeTemplate = await getCompleteTemplate(pool, template.id);
+
+      res.status(201).json({
+        success: true,
+        message: 'Template created successfully',
+        template: completeTemplate
+      });
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Error creating workflow template:', error);
+      res.status(500).json({
+        error: 'Failed to create template',
+        details: error.message
+      });
+    } finally {
+      client.release();
+    }
+  });
+
+  // ==========================================================================
+  // UPDATE WORKFLOW TEMPLATE
+  // PUT /api/v1/workflows/templates/:templateId
+  // ==========================================================================
+
+  app.put('/api/v1/workflows/templates/:templateId', authenticateToken, async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+      const { templateId } = req.params;
+      const { name, entity_type, description, is_active, is_default, stages, transitions } = req.body;
+
+      // Check if template exists
+      const existingResult = await client.query(
+        `SELECT * FROM workflow_templates WHERE id = $1`,
+        [templateId]
+      );
+
+      if (existingResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Template not found' });
+      }
+
+      // Check if template is in use
+      const inUseResult = await client.query(
+        `SELECT COUNT(*) FROM workflow_instances WHERE workflow_template_id = $1 AND workflow_status = 'active'`,
+        [templateId]
+      );
+
+      if (parseInt(inUseResult.rows[0].count) > 0) {
+        return res.status(409).json({
+          error: 'Cannot update template while it has active workflows',
+          active_count: inUseResult.rows[0].count
+        });
+      }
+
+      await client.query('BEGIN');
+
+      // If this is set as default, unset other defaults for this entity type
+      if (is_default) {
+        await client.query(
+          `UPDATE workflow_templates SET is_default = false WHERE entity_type = $1 AND id != $2`,
+          [entity_type || existingResult.rows[0].entity_type, templateId]
+        );
+      }
+
+      // Update template
+      const updateResult = await client.query(
+        `UPDATE workflow_templates
+         SET name = COALESCE($1, name),
+             entity_type = COALESCE($2, entity_type),
+             description = COALESCE($3, description),
+             is_active = COALESCE($4, is_active),
+             is_default = COALESCE($5, is_default),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $6
+         RETURNING *`,
+        [name, entity_type, description, is_active, is_default, templateId]
+      );
+
+      // If stages are provided, replace them
+      if (stages && Array.isArray(stages)) {
+        // Delete existing stages and transitions
+        await client.query(`DELETE FROM workflow_transitions WHERE workflow_template_id = $1`, [templateId]);
+        await client.query(`DELETE FROM workflow_stages WHERE workflow_template_id = $1`, [templateId]);
+
+        // Create new stages
+        const stageIdMap = {};
+
+        for (const stage of stages) {
+          const stageResult = await client.query(
+            `INSERT INTO workflow_stages (
+              workflow_template_id,
+              stage_number,
+              stage_name,
+              stage_type,
+              sla_hours,
+              assignment_rules,
+              actions,
+              description
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING *`,
+            [
+              templateId,
+              stage.stage_number,
+              stage.stage_name,
+              stage.stage_type || 'approval',
+              stage.sla_hours || 48,
+              stage.assignment_rules || { type: 'role', role: '' },
+              stage.actions || ['approve', 'reject'],
+              stage.description
+            ]
+          );
+
+          stageIdMap[stage.stage_number] = stageResult.rows[0].id;
+        }
+
+        // Create new transitions
+        if (transitions && Array.isArray(transitions)) {
+          for (const transition of transitions) {
+            const fromStageResult = await client.query(
+              `SELECT id FROM workflow_stages
+               WHERE workflow_template_id = $1 AND stage_number = $2`,
+              [templateId, transition.from_stage_number || 1]
+            );
+
+            const toStageResult = await client.query(
+              `SELECT id FROM workflow_stages
+               WHERE workflow_template_id = $1 AND stage_number = $2`,
+              [templateId, transition.to_stage_number || 2]
+            );
+
+            if (fromStageResult.rows.length > 0 && toStageResult.rows.length > 0) {
+              await client.query(
+                `INSERT INTO workflow_transitions (
+                  workflow_template_id,
+                  from_stage_id,
+                  to_stage_id,
+                  transition_action,
+                  transition_name,
+                  is_automatic,
+                  conditions
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                [
+                  templateId,
+                  fromStageResult.rows[0].id,
+                  toStageResult.rows[0].id,
+                  transition.transition_action || 'approve',
+                  transition.transition_name || 'Approve',
+                  transition.is_automatic || false,
+                  transition.conditions || {}
+                ]
+              );
+            }
+          }
+        }
+      }
+
+      await client.query('COMMIT');
+
+      // Fetch complete updated template
+      const completeTemplate = await getCompleteTemplate(pool, templateId);
+
+      res.json({
+        success: true,
+        message: 'Template updated successfully',
+        template: completeTemplate
+      });
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Error updating workflow template:', error);
+      res.status(500).json({
+        error: 'Failed to update template',
+        details: error.message
+      });
+    } finally {
+      client.release();
+    }
+  });
+
+  // ==========================================================================
+  // DELETE WORKFLOW TEMPLATE
+  // DELETE /api/v1/workflows/templates/:templateId
+  // ==========================================================================
+
+  app.delete('/api/v1/workflows/templates/:templateId', authenticateToken, async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+      const { templateId } = req.params;
+
+      // Check if template exists
+      const existingResult = await client.query(
+        `SELECT * FROM workflow_templates WHERE id = $1`,
+        [templateId]
+      );
+
+      if (existingResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Template not found' });
+      }
+
+      // Check if template is in use
+      const inUseResult = await client.query(
+        `SELECT COUNT(*) FROM workflow_instances WHERE workflow_template_id = $1`,
+        [templateId]
+      );
+
+      if (parseInt(inUseResult.rows[0].count) > 0) {
+        return res.status(409).json({
+          error: 'Cannot delete template that has been used in workflows',
+          usage_count: inUseResult.rows[0].count,
+          suggestion: 'Consider deactivating the template instead'
+        });
+      }
+
+      await client.query('BEGIN');
+
+      // Delete transitions
+      await client.query(
+        `DELETE FROM workflow_transitions WHERE workflow_template_id = $1`,
+        [templateId]
+      );
+
+      // Delete stages
+      await client.query(
+        `DELETE FROM workflow_stages WHERE workflow_template_id = $1`,
+        [templateId]
+      );
+
+      // Delete template
+      await client.query(
+        `DELETE FROM workflow_templates WHERE id = $1`,
+        [templateId]
+      );
+
+      await client.query('COMMIT');
+
+      res.json({
+        success: true,
+        message: 'Template deleted successfully'
+      });
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Error deleting workflow template:', error);
+      res.status(500).json({
+        error: 'Failed to delete template',
+        details: error.message
+      });
+    } finally {
+      client.release();
+    }
+  });
+
   console.log('✅ Workflow API routes registered');
+}
+
+// ==========================================================================
+// HELPER FUNCTIONS
+// ==========================================================================
+
+/**
+ * Get complete template with stages and transitions
+ */
+async function getCompleteTemplate(pool, templateId) {
+  const templateResult = await pool.query(
+    `SELECT * FROM workflow_templates WHERE id = $1`,
+    [templateId]
+  );
+
+  if (templateResult.rows.length === 0) {
+    throw new Error('Template not found');
+  }
+
+  const template = templateResult.rows[0];
+
+  const stagesResult = await pool.query(
+    `SELECT * FROM workflow_stages WHERE workflow_template_id = $1 ORDER BY stage_number`,
+    [templateId]
+  );
+
+  const transitionsResult = await pool.query(
+    `SELECT
+      wt.*,
+      ws_from.stage_name AS from_stage_name,
+      ws_from.stage_number AS from_stage_number,
+      ws_to.stage_name AS to_stage_name,
+      ws_to.stage_number AS to_stage_number
+     FROM workflow_transitions wt
+     LEFT JOIN workflow_stages ws_from ON ws_from.id = wt.from_stage_id
+     LEFT JOIN workflow_stages ws_to ON ws_to.id = wt.to_stage_id
+     WHERE wt.workflow_template_id = $1
+     ORDER BY ws_from.stage_number NULLS FIRST`,
+    [templateId]
+  );
+
+  return {
+    ...template,
+    stages: stagesResult.rows,
+    transitions: transitionsResult.rows
+  };
 }
 
 module.exports = { registerWorkflowRoutes };
