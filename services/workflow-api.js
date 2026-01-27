@@ -89,7 +89,214 @@ function registerWorkflowRoutes(app, pool, authenticateToken) {
   });
 
   // ==========================================================================
+  // GET USER TASKS (MUST BE BEFORE :workflowId ROUTE)
+  // GET /api/v1/workflows/tasks/my-tasks
+  // ==========================================================================
+
+  app.get('/api/v1/workflows/tasks/my-tasks', authenticateToken, async (req, res) => {
+    try {
+      const { project_id, entity_type } = req.query;
+
+      const filters = {};
+      if (project_id) filters.projectId = project_id;
+      if (entity_type) filters.entityType = entity_type;
+
+      const tasks = await workflowManager.getUserTasks(req.user.userId, filters);
+
+      res.json({
+        success: true,
+        count: tasks.length,
+        tasks
+      });
+
+    } catch (error) {
+      console.error('Error getting user tasks:', error);
+      res.status(500).json({
+        error: 'Failed to retrieve tasks',
+        details: error.message
+      });
+    }
+  });
+
+  // ==========================================================================
+  // GET PROJECT WORKFLOWS (MUST BE BEFORE :workflowId ROUTE)
+  // GET /api/v1/workflows/project/:projectId
+  // ==========================================================================
+
+  app.get('/api/v1/workflows/project/:projectId', authenticateToken, async (req, res) => {
+    try {
+      const { projectId } = req.params;
+      const { entity_type, status } = req.query;
+
+      const filters = {};
+      if (entity_type) filters.entityType = entity_type;
+      if (status) filters.status = status;
+
+      const workflows = await workflowManager.getProjectWorkflows(projectId, filters);
+
+      res.json({
+        success: true,
+        count: workflows.length,
+        workflows
+      });
+
+    } catch (error) {
+      console.error('Error getting project workflows:', error);
+      res.status(500).json({
+        error: 'Failed to retrieve workflows',
+        details: error.message
+      });
+    }
+  });
+
+  // ==========================================================================
+  // GET WORKFLOW STATISTICS (MUST BE BEFORE :workflowId ROUTE)
+  // GET /api/v1/workflows/stats/project/:projectId
+  // ==========================================================================
+
+  app.get('/api/v1/workflows/stats/project/:projectId', authenticateToken, async (req, res) => {
+    try {
+      const { projectId } = req.params;
+
+      const statsResult = await pool.query(
+        `SELECT
+          COUNT(*) AS total_workflows,
+          COUNT(*) FILTER (WHERE workflow_status = 'active') AS active,
+          COUNT(*) FILTER (WHERE workflow_status = 'completed') AS completed,
+          COUNT(*) FILTER (WHERE workflow_status = 'rejected') AS rejected,
+          COUNT(*) FILTER (WHERE is_overdue = true) AS overdue,
+          entity_type,
+          COUNT(DISTINCT assigned_to) AS unique_assignees
+         FROM workflow_instances
+         WHERE project_id = $1
+         GROUP BY entity_type`,
+        [projectId]
+      );
+
+      res.json({
+        success: true,
+        stats: statsResult.rows
+      });
+
+    } catch (error) {
+      console.error('Error getting workflow statistics:', error);
+      res.status(500).json({
+        error: 'Failed to retrieve statistics',
+        details: error.message
+      });
+    }
+  });
+
+  // ==========================================================================
+  // GET WORKFLOW TEMPLATES (MUST BE BEFORE :workflowId ROUTE)
+  // GET /api/v1/workflows/templates
+  // ==========================================================================
+
+  app.get('/api/v1/workflows/templates', authenticateToken, async (req, res) => {
+    try {
+      const { entity_type } = req.query;
+
+      let query = `
+        SELECT
+          wt.*,
+          COUNT(DISTINCT ws.id) AS stage_count,
+          COUNT(DISTINCT wtr.id) AS transition_count
+        FROM workflow_templates wt
+        LEFT JOIN workflow_stages ws ON ws.workflow_template_id = wt.id
+        LEFT JOIN workflow_transitions wtr ON wtr.workflow_template_id = wt.id
+        WHERE wt.is_active = true
+      `;
+
+      const params = [];
+
+      if (entity_type) {
+        query += ` AND wt.entity_type = $1`;
+        params.push(entity_type);
+      }
+
+      query += `
+        GROUP BY wt.id
+        ORDER BY wt.entity_type, wt.is_default DESC, wt.name
+      `;
+
+      const result = await pool.query(query, params);
+
+      res.json({
+        success: true,
+        templates: result.rows
+      });
+
+    } catch (error) {
+      console.error('Error getting workflow templates:', error);
+      res.status(500).json({
+        error: 'Failed to retrieve templates',
+        details: error.message
+      });
+    }
+  });
+
+  // ==========================================================================
+  // GET WORKFLOW TEMPLATE DETAILS (MUST BE BEFORE :workflowId ROUTE)
+  // GET /api/v1/workflows/templates/:templateId
+  // ==========================================================================
+
+  app.get('/api/v1/workflows/templates/:templateId', authenticateToken, async (req, res) => {
+    try {
+      const { templateId } = req.params;
+
+      // Get template
+      const templateResult = await pool.query(
+        `SELECT * FROM workflow_templates WHERE id = $1`,
+        [templateId]
+      );
+
+      if (templateResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Template not found' });
+      }
+
+      const template = templateResult.rows[0];
+
+      // Get stages
+      const stagesResult = await pool.query(
+        `SELECT * FROM workflow_stages WHERE workflow_template_id = $1 ORDER BY stage_number`,
+        [templateId]
+      );
+
+      // Get transitions
+      const transitionsResult = await pool.query(
+        `SELECT
+          wt.*,
+          ws_from.stage_name AS from_stage_name,
+          ws_to.stage_name AS to_stage_name
+         FROM workflow_transitions wt
+         LEFT JOIN workflow_stages ws_from ON ws_from.id = wt.from_stage_id
+         LEFT JOIN workflow_stages ws_to ON ws_to.id = wt.to_stage_id
+         WHERE wt.workflow_template_id = $1
+         ORDER BY ws_from.stage_number NULLS FIRST`,
+        [templateId]
+      );
+
+      res.json({
+        success: true,
+        template: {
+          ...template,
+          stages: stagesResult.rows,
+          transitions: transitionsResult.rows
+        }
+      });
+
+    } catch (error) {
+      console.error('Error getting template details:', error);
+      res.status(500).json({
+        error: 'Failed to retrieve template details',
+        details: error.message
+      });
+    }
+  });
+
+  // ==========================================================================
   // GET WORKFLOW BY ID
+  // NOTE: This MUST come after all specific routes (/templates, /tasks, etc.)
   // GET /api/v1/workflows/:workflowId
   // ==========================================================================
 
@@ -190,66 +397,6 @@ function registerWorkflowRoutes(app, pool, authenticateToken) {
     }
   });
 
-  // ==========================================================================
-  // GET USER TASKS
-  // GET /api/v1/workflows/tasks/my-tasks
-  // ==========================================================================
-
-  app.get('/api/v1/workflows/tasks/my-tasks', authenticateToken, async (req, res) => {
-    try {
-      const { project_id, entity_type } = req.query;
-
-      const filters = {};
-      if (project_id) filters.projectId = project_id;
-      if (entity_type) filters.entityType = entity_type;
-
-      const tasks = await workflowManager.getUserTasks(req.user.userId, filters);
-
-      res.json({
-        success: true,
-        count: tasks.length,
-        tasks
-      });
-
-    } catch (error) {
-      console.error('Error getting user tasks:', error);
-      res.status(500).json({
-        error: 'Failed to retrieve tasks',
-        details: error.message
-      });
-    }
-  });
-
-  // ==========================================================================
-  // GET PROJECT WORKFLOWS
-  // GET /api/v1/workflows/project/:projectId
-  // ==========================================================================
-
-  app.get('/api/v1/workflows/project/:projectId', authenticateToken, async (req, res) => {
-    try {
-      const { projectId } = req.params;
-      const { entity_type, status } = req.query;
-
-      const filters = {};
-      if (entity_type) filters.entityType = entity_type;
-      if (status) filters.status = status;
-
-      const workflows = await workflowManager.getProjectWorkflows(projectId, filters);
-
-      res.json({
-        success: true,
-        count: workflows.length,
-        workflows
-      });
-
-    } catch (error) {
-      console.error('Error getting project workflows:', error);
-      res.status(500).json({
-        error: 'Failed to retrieve workflows',
-        details: error.message
-      });
-    }
-  });
 
   // ==========================================================================
   // CANCEL WORKFLOW
@@ -334,150 +481,6 @@ function registerWorkflowRoutes(app, pool, authenticateToken) {
     }
   });
 
-  // ==========================================================================
-  // GET WORKFLOW TEMPLATES
-  // GET /api/v1/workflows/templates
-  // ==========================================================================
-
-  app.get('/api/v1/workflows/templates', authenticateToken, async (req, res) => {
-    try {
-      const { entity_type } = req.query;
-
-      let query = `
-        SELECT
-          wt.*,
-          COUNT(DISTINCT ws.id) AS stage_count,
-          COUNT(DISTINCT wtr.id) AS transition_count
-        FROM workflow_templates wt
-        LEFT JOIN workflow_stages ws ON ws.workflow_template_id = wt.id
-        LEFT JOIN workflow_transitions wtr ON wtr.workflow_template_id = wt.id
-        WHERE wt.is_active = true
-      `;
-
-      const params = [];
-
-      if (entity_type) {
-        query += ` AND wt.entity_type = $1`;
-        params.push(entity_type);
-      }
-
-      query += `
-        GROUP BY wt.id
-        ORDER BY wt.entity_type, wt.is_default DESC, wt.name
-      `;
-
-      const result = await pool.query(query, params);
-
-      res.json({
-        success: true,
-        templates: result.rows
-      });
-
-    } catch (error) {
-      console.error('Error getting workflow templates:', error);
-      res.status(500).json({
-        error: 'Failed to retrieve templates',
-        details: error.message
-      });
-    }
-  });
-
-  // ==========================================================================
-  // GET WORKFLOW TEMPLATE DETAILS
-  // GET /api/v1/workflows/templates/:templateId
-  // ==========================================================================
-
-  app.get('/api/v1/workflows/templates/:templateId', authenticateToken, async (req, res) => {
-    try {
-      const { templateId } = req.params;
-
-      // Get template
-      const templateResult = await pool.query(
-        `SELECT * FROM workflow_templates WHERE id = $1`,
-        [templateId]
-      );
-
-      if (templateResult.rows.length === 0) {
-        return res.status(404).json({ error: 'Template not found' });
-      }
-
-      const template = templateResult.rows[0];
-
-      // Get stages
-      const stagesResult = await pool.query(
-        `SELECT * FROM workflow_stages WHERE workflow_template_id = $1 ORDER BY stage_number`,
-        [templateId]
-      );
-
-      // Get transitions
-      const transitionsResult = await pool.query(
-        `SELECT
-          wt.*,
-          ws_from.stage_name AS from_stage_name,
-          ws_to.stage_name AS to_stage_name
-         FROM workflow_transitions wt
-         LEFT JOIN workflow_stages ws_from ON ws_from.id = wt.from_stage_id
-         LEFT JOIN workflow_stages ws_to ON ws_to.id = wt.to_stage_id
-         WHERE wt.workflow_template_id = $1
-         ORDER BY ws_from.stage_number NULLS FIRST`,
-        [templateId]
-      );
-
-      res.json({
-        success: true,
-        template: {
-          ...template,
-          stages: stagesResult.rows,
-          transitions: transitionsResult.rows
-        }
-      });
-
-    } catch (error) {
-      console.error('Error getting template details:', error);
-      res.status(500).json({
-        error: 'Failed to retrieve template details',
-        details: error.message
-      });
-    }
-  });
-
-  // ==========================================================================
-  // GET WORKFLOW STATISTICS
-  // GET /api/v1/workflows/stats/project/:projectId
-  // ==========================================================================
-
-  app.get('/api/v1/workflows/stats/project/:projectId', authenticateToken, async (req, res) => {
-    try {
-      const { projectId } = req.params;
-
-      const statsResult = await pool.query(
-        `SELECT
-          COUNT(*) AS total_workflows,
-          COUNT(*) FILTER (WHERE workflow_status = 'active') AS active,
-          COUNT(*) FILTER (WHERE workflow_status = 'completed') AS completed,
-          COUNT(*) FILTER (WHERE workflow_status = 'rejected') AS rejected,
-          COUNT(*) FILTER (WHERE is_overdue = true) AS overdue,
-          entity_type,
-          COUNT(DISTINCT assigned_to) AS unique_assignees
-         FROM workflow_instances
-         WHERE project_id = $1
-         GROUP BY entity_type`,
-        [projectId]
-      );
-
-      res.json({
-        success: true,
-        stats: statsResult.rows
-      });
-
-    } catch (error) {
-      console.error('Error getting workflow statistics:', error);
-      res.status(500).json({
-        error: 'Failed to retrieve statistics',
-        details: error.message
-      });
-    }
-  });
 
   // ==========================================================================
   // CREATE WORKFLOW TEMPLATE
