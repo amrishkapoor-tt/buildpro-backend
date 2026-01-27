@@ -543,6 +543,7 @@ SELECT
     wi.id AS workflow_instance_id,
     wi.entity_type,
     wi.entity_id,
+    wi.project_id,
     ws.stage_name AS current_stage,
     wi.assigned_to AS assignee_id,
     CONCAT(u.first_name, ' ', u.last_name) AS assignee_name,

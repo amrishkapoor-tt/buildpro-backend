@@ -61,6 +61,33 @@ async function runMigrations(pool) {
     }
 
     // ==========================================================================
+    // HOTFIX 009: Add project_id to active_workflow_tasks view
+    // Purpose: Fix missing project_id column causing 500 errors
+    // Check: Query view columns to see if project_id exists
+    // ==========================================================================
+
+    if (workflowCheck.rows[0].exists) {
+      // Only run this if workflow tables exist (meaning migration 009 ran)
+      const viewColumnCheck = await client.query(`
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+        AND table_name = 'active_workflow_tasks'
+        AND column_name = 'project_id';
+      `);
+
+      if (viewColumnCheck.rows.length === 0) {
+        console.log('📊 Running hotfix 009: Add project_id to view...');
+
+        const hotfixPath = path.join(__dirname, '..', 'migrations', '009_hotfix_add_project_id_to_view.sql');
+        const hotfixSql = fs.readFileSync(hotfixPath, 'utf8');
+        await client.query(hotfixSql);
+
+        console.log('✅ Hotfix 009 completed - view now includes project_id');
+      }
+    }
+
+    // ==========================================================================
     // ADD NEW MIGRATIONS HERE
     // Copy the block above and modify for your new migration:
     //
