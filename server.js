@@ -37,12 +37,16 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-pool.connect((err, client, release) => {
+pool.connect(async (err, client, release) => {
   if (err) {
     console.error('❌ Database error:', err.stack);
   } else {
     console.log('✅ Database connected');
     release();
+
+    // Run migrations automatically
+    const { runMigrations } = require('./services/run-migrations');
+    await runMigrations(pool);
   }
 });
 
