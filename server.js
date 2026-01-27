@@ -14,6 +14,7 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const storage = require('./storage');
 const { upload, storageType } = require('./middleware/upload');
+const { registerWorkflowRoutes } = require('./services/workflow-api');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -5049,6 +5050,11 @@ app.get('/api/v1/projects/:projectId/open-punch', authenticateToken, requireProj
     res.status(500).json({ error: 'Open punch items query failed', details: error.message, punchItems: [] });
   }
 });
+
+// ============================================================================
+// WORKFLOW ENGINE API ROUTES
+// ============================================================================
+registerWorkflowRoutes(app, pool, authenticateToken);
 
 // ERROR HANDLER
 app.use((err, req, res, next) => {
