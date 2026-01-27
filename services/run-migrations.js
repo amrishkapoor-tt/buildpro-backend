@@ -2,8 +2,26 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * Run database migrations automatically on server startup
- * Checks if tables exist before running to avoid duplicate migrations
+ * ============================================================================
+ * BUILDPRO MIGRATION SYSTEM
+ * ============================================================================
+ *
+ * Simple check-and-run migration system that executes on server startup.
+ *
+ * HOW IT WORKS:
+ * 1. Each migration has a "check table" - a main table it creates
+ * 2. On startup, we check if that table exists
+ * 3. If not, we run the migration SQL file
+ * 4. If yes, we skip it (tables already created)
+ *
+ * ADDING NEW MIGRATIONS:
+ * 1. Create new SQL file: migrations/010_your_feature.sql
+ * 2. Add a new check block below following the existing pattern
+ * 3. Choose a unique main table to check for existence
+ * 4. Test locally before deploying
+ *
+ * See migrations/README.md for detailed instructions!
+ * ============================================================================
  */
 async function runMigrations(pool) {
   console.log('🔍 Checking for pending migrations...');
@@ -11,8 +29,14 @@ async function runMigrations(pool) {
   const client = await pool.connect();
 
   try {
-    // Check if workflow_templates table exists
-    const tableCheck = await client.query(`
+    // ==========================================================================
+    // MIGRATION 009: Workflow Engine
+    // Purpose: Complete workflow system with templates, stages, transitions
+    // Check Table: workflow_templates
+    // File: migrations/009_workflow_engine.sql
+    // ==========================================================================
+
+    const workflowCheck = await client.query(`
       SELECT EXISTS (
         SELECT FROM information_schema.tables
         WHERE table_schema = 'public'
@@ -20,34 +44,54 @@ async function runMigrations(pool) {
       );
     `);
 
-    const tableExists = tableCheck.rows[0].exists;
+    if (!workflowCheck.rows[0].exists) {
+      console.log('📊 Running migration 009: Workflow Engine...');
 
-    if (tableExists) {
-      console.log('✅ Workflow tables already exist, skipping migration');
-      return;
+      const migrationPath = path.join(__dirname, '..', 'migrations', '009_workflow_engine.sql');
+      const sql = fs.readFileSync(migrationPath, 'utf8');
+      await client.query(sql);
+
+      // Verify migration success
+      const verifyResult = await client.query(`
+        SELECT COUNT(*) as count FROM workflow_templates;
+      `);
+
+      console.log('✅ Migration 009 completed');
+      console.log(`   📝 Seeded ${verifyResult.rows[0].count} workflow templates`);
     }
 
-    console.log('📊 Workflow tables not found, running migration...');
+    // ==========================================================================
+    // ADD NEW MIGRATIONS HERE
+    // Copy the block above and modify for your new migration:
+    //
+    // const yourFeatureCheck = await client.query(`
+    //   SELECT EXISTS (
+    //     SELECT FROM information_schema.tables
+    //     WHERE table_schema = 'public'
+    //     AND table_name = 'your_main_table'
+    //   );
+    // `);
+    //
+    // if (!yourFeatureCheck.rows[0].exists) {
+    //   console.log('📊 Running migration 010: Your Feature...');
+    //
+    //   const sql = fs.readFileSync(
+    //     path.join(__dirname, '..', 'migrations', '010_your_feature.sql'),
+    //     'utf8'
+    //   );
+    //   await client.query(sql);
+    //
+    //   console.log('✅ Migration 010 completed');
+    // }
+    // ==========================================================================
 
-    // Read and execute the workflow migration
-    const migrationPath = path.join(__dirname, '..', 'migrations', '009_workflow_engine.sql');
-    const sql = fs.readFileSync(migrationPath, 'utf8');
-
-    await client.query(sql);
-
-    console.log('✅ Workflow migration completed successfully!');
-
-    // Verify
-    const verifyResult = await client.query(`
-      SELECT COUNT(*) as count FROM workflow_templates;
-    `);
-
-    console.log(`📝 Seeded ${verifyResult.rows[0].count} workflow templates`);
+    console.log('✅ All migrations up to date');
 
   } catch (error) {
     console.error('❌ Migration failed:', error.message);
+    console.error('   Full error:', error);
     // Don't crash the server, just log the error
-    console.error('⚠️  Server will continue but workflow features may not work');
+    console.error('⚠️  Server will continue but features from failed migration may not work');
   } finally {
     client.release();
   }
