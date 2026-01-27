@@ -7,9 +7,7 @@ const path = require('path');
 // Database configuration from environment variables
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL?.includes('localhost') ? false : {
-    rejectUnauthorized: false
-  }
+  ssl: false  // Disable SSL for local development
 });
 
 async function runMigration() {
