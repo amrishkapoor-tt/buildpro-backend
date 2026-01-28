@@ -267,7 +267,9 @@ function registerWorkflowRoutes(app, pool, authenticateToken) {
         `SELECT
           wt.*,
           ws_from.stage_name AS from_stage_name,
-          ws_to.stage_name AS to_stage_name
+          ws_from.stage_number AS from_stage_number,
+          ws_to.stage_name AS to_stage_name,
+          ws_to.stage_number AS to_stage_number
          FROM workflow_transitions wt
          LEFT JOIN workflow_stages ws_from ON ws_from.id = wt.from_stage_id
          LEFT JOIN workflow_stages ws_to ON ws_to.id = wt.to_stage_id
