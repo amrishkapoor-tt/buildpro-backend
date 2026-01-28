@@ -547,8 +547,8 @@ function registerWorkflowRoutes(app, pool, authenticateToken) {
             stage.stage_name,
             stage.stage_type || 'approval',
             stage.sla_hours || 48,
-            stage.assignment_rules || { type: 'role', role: '' },
-            stage.actions || ['approve', 'reject']
+            JSON.stringify(stage.assignment_rules || { type: 'role', role: '' }),
+            JSON.stringify(stage.actions || ['approve', 'reject'])
           ]
         );
 
@@ -590,7 +590,7 @@ function registerWorkflowRoutes(app, pool, authenticateToken) {
                 transition.transition_action || 'approve',
                 transition.transition_name || 'Approve',
                 transition.is_automatic || false,
-                transition.conditions || {}
+                JSON.stringify(transition.conditions || {})
               ]
             );
           }
@@ -706,8 +706,8 @@ function registerWorkflowRoutes(app, pool, authenticateToken) {
               stage.stage_name,
               stage.stage_type || 'approval',
               stage.sla_hours || 48,
-              stage.assignment_rules || { type: 'role', role: '' },
-              stage.actions || ['approve', 'reject']
+              JSON.stringify(stage.assignment_rules || { type: 'role', role: '' }),
+              JSON.stringify(stage.actions || ['approve', 'reject'])
             ]
           );
 
@@ -747,7 +747,7 @@ function registerWorkflowRoutes(app, pool, authenticateToken) {
                   transition.transition_action || 'approve',
                   transition.transition_name || 'Approve',
                   transition.is_automatic || false,
-                  transition.conditions || {}
+                  JSON.stringify(transition.conditions || {})
                 ]
               );
             }
