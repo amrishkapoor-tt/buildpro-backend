@@ -538,9 +538,8 @@ function registerWorkflowRoutes(app, pool, authenticateToken) {
             stage_type,
             sla_hours,
             assignment_rules,
-            actions,
-            description
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            actions
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7)
           RETURNING *`,
           [
             template.id,
@@ -549,8 +548,7 @@ function registerWorkflowRoutes(app, pool, authenticateToken) {
             stage.stage_type || 'approval',
             stage.sla_hours || 48,
             stage.assignment_rules || { type: 'role', role: '' },
-            stage.actions || ['approve', 'reject'],
-            stage.description
+            stage.actions || ['approve', 'reject']
           ]
         );
 
@@ -699,9 +697,8 @@ function registerWorkflowRoutes(app, pool, authenticateToken) {
               stage_type,
               sla_hours,
               assignment_rules,
-              actions,
-              description
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+              actions
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING *`,
             [
               templateId,
@@ -710,8 +707,7 @@ function registerWorkflowRoutes(app, pool, authenticateToken) {
               stage.stage_type || 'approval',
               stage.sla_hours || 48,
               stage.assignment_rules || { type: 'role', role: '' },
-              stage.actions || ['approve', 'reject'],
-              stage.description
+              stage.actions || ['approve', 'reject']
             ]
           );
 
